@@ -11,7 +11,7 @@
  *
  *     https://opensource.org/licenses/BSD-3-Clause
  */
-#define _GNU_SOURCE /* signals, threads, SO_PEERCRED */
+#define _POSIX_SOUCE /* signals */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -20,20 +20,16 @@
 #include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <time.h>
 #include <signal.h>
-#include <pwd.h>
 
 #include "libnetconf.h"
 #include "session_server.h"
-#include "session_server_ch.h"
 
 struct nc_server_opts server_opts = {
 #ifdef NC_ENABLED_SSH
@@ -51,11 +47,6 @@ nc_server_endpt_lock_get(const char *name, NC_TRANSPORT_IMPL ti, uint16_t *idx)
 {
     uint16_t i;
     struct nc_endpt *endpt = NULL;
-
-    if (!name) {
-        ERRARG("endpt_name");
-        return NULL;
-    }
 
     /* WRITE LOCK */
     pthread_rwlock_wrlock(&server_opts.endpt_lock);
@@ -81,58 +72,37 @@ nc_server_endpt_lock_get(const char *name, NC_TRANSPORT_IMPL ti, uint16_t *idx)
     return endpt;
 }
 
-struct nc_ch_endpt *
-nc_server_ch_client_lock(const char *name, const char *endpt_name, NC_TRANSPORT_IMPL ti, struct nc_ch_client **client_p)
+struct nc_ch_client *
+nc_server_ch_client_lock(const char *name, NC_TRANSPORT_IMPL ti, uint16_t *idx)
 {
-    uint16_t i, j;
+    uint16_t i;
     struct nc_ch_client *client = NULL;
-    struct nc_ch_endpt *endpt = NULL;
-
-    *client_p = NULL;
-
-    if (!name) {
-        ERRARG("client_name");
-        return NULL;
-    }
 
     /* READ LOCK */
     pthread_rwlock_rdlock(&server_opts.ch_client_lock);
 
     for (i = 0; i < server_opts.ch_client_count; ++i) {
-        if (!strcmp(server_opts.ch_clients[i].name, name)) {
+        if (!strcmp(server_opts.ch_clients[i].name, name) && (!ti || (server_opts.ch_clients[i].ti == ti))) {
             client = &server_opts.ch_clients[i];
-            if (!endpt_name && !ti) {
-                /* return only client */
-                break;
-            }
-            for (j = 0; j < client->ch_endpt_count; ++j) {
-                if (!strcmp(client->ch_endpts[j].name, endpt_name) && (!ti || (ti == client->ch_endpts[j].ti))) {
-                    endpt = &client->ch_endpts[j];
-                    break;
-                }
-            }
             break;
         }
     }
 
     if (!client) {
         ERR("Call Home client \"%s\" was not found.", name);
-
         /* READ UNLOCK */
         pthread_rwlock_unlock(&server_opts.ch_client_lock);
-    } else if (endpt_name && ti && !endpt) {
-        ERR("Call Home client \"%s\" endpoint \"%s\" was not found.", name, endpt_name);
-
-        /* READ UNLOCK */
-        pthread_rwlock_unlock(&server_opts.ch_client_lock);
-    } else {
-        /* CH CLIENT LOCK */
-        pthread_mutex_lock(&client->lock);
-
-        *client_p = client;
+        return NULL;
     }
 
-    return endpt;
+    /* CH CLIENT LOCK */
+    pthread_mutex_lock(&client->lock);
+
+    if (idx) {
+        *idx = i;
+    }
+
+    return client;
 }
 
 void
@@ -156,44 +126,14 @@ nc_session_set_term_reason(struct nc_session *session, NC_SESSION_TERM_REASON re
         return;
     }
 
-    if ((reason != NC_SESSION_TERM_KILLED) && (session->term_reason == NC_SESSION_TERM_KILLED)) {
-        session->killed_by = 0;
-    }
     session->term_reason = reason;
 }
 
-API void
-nc_session_set_killed_by(struct nc_session *session, uint32_t sid)
-{
-    if (!session || (session->term_reason != NC_SESSION_TERM_KILLED)) {
-        ERRARG("session");
-        return;
-    } else if (!sid) {
-        ERRARG("sid");
-        return;
-    }
-
-    session->killed_by = sid;
-}
-
-API void
-nc_session_set_status(struct nc_session *session, NC_STATUS status)
-{
-    if (!session) {
-        ERRARG("session");
-        return;
-    } else if (!status) {
-        ERRARG("status");
-        return;
-    }
-
-    session->status = status;
-}
-
 int
-nc_sock_listen_inet(const char *address, uint16_t port, struct nc_keepalives *ka)
+nc_sock_listen(const char *address, uint16_t port)
 {
-    int opt;
+    const int optVal = 1;
+    const socklen_t optLen = sizeof(optVal);
     int is_ipv4, sock;
     struct sockaddr_storage saddr;
 
@@ -213,18 +153,8 @@ nc_sock_listen_inet(const char *address, uint16_t port, struct nc_keepalives *ka
         goto fail;
     }
 
-    /* these options will be inherited by accepted sockets */
-    opt = 1;
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt) == -1) {
-        ERR("Could not set SO_REUSEADDR socket option (%s).", strerror(errno));
-        goto fail;
-    }
-    if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof opt) == -1) {
-        ERR("Could not set TCP_NODELAY socket option (%s).", strerror(errno));
-        goto fail;
-    }
-
-    if (nc_sock_enable_keepalive(sock, ka)) {
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void *)&optVal, optLen)) {
+        ERR("Could not set socket SO_REUSEADDR socket option (%s).", strerror(errno));
         goto fail;
     }
 
@@ -264,57 +194,6 @@ nc_sock_listen_inet(const char *address, uint16_t port, struct nc_keepalives *ka
 
     if (listen(sock, NC_REVERSE_QUEUE) == -1) {
         ERR("Unable to start listening on \"%s\" port %d (%s).", address, port, strerror(errno));
-        goto fail;
-    }
-
-    return sock;
-
-fail:
-    if (sock > -1) {
-        close(sock);
-    }
-
-    return -1;
-}
-
-int
-nc_sock_listen_unix(const char *address, const struct nc_server_unix_opts *opts)
-{
-    struct sockaddr_un sun;
-    int sock = -1;
-
-    sock = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sock == -1) {
-        ERR("Failed to create socket (%s).", strerror(errno));
-        goto fail;
-    }
-
-    memset(&sun, 0, sizeof(sun));
-    sun.sun_family = AF_UNIX;
-    snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", address);
-
-    unlink(sun.sun_path);
-    if (bind(sock, (struct sockaddr *)&sun, sizeof(sun)) == -1) {
-        ERR("Could not bind \"%s\" (%s).", address, strerror(errno));
-        goto fail;
-    }
-
-    if (opts->mode != (mode_t)-1) {
-        if (chmod(sun.sun_path, opts->mode) < 0) {
-            ERR("Failed to set unix socket permissions (%s).", strerror(errno));
-            goto fail;
-        }
-    }
-
-    if (opts->uid != (uid_t)-1 || opts->gid != (gid_t)-1) {
-        if (chown(sun.sun_path, opts->uid, opts->gid) < 0) {
-            ERR("Failed to set unix socket uid/gid (%s).", strerror(errno));
-            goto fail;
-        }
-    }
-
-    if (listen(sock, NC_REVERSE_QUEUE) == -1) {
-        ERR("Unable to start listening on \"%s\" (%s).", address, strerror(errno));
         goto fail;
     }
 
@@ -427,9 +306,9 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, ch
     /* host was requested */
     if (host) {
         if (saddr.ss_family == AF_INET) {
-            *host = malloc(INET_ADDRSTRLEN);
+            *host = malloc(15);
             if (*host) {
-                if (!inet_ntop(AF_INET, &((struct sockaddr_in *)&saddr)->sin_addr.s_addr, *host, INET_ADDRSTRLEN)) {
+                if (!inet_ntop(AF_INET, &((struct sockaddr_in *)&saddr)->sin_addr.s_addr, *host, 15)) {
                     ERR("inet_ntop failed (%s).", strerror(errno));
                     free(*host);
                     *host = NULL;
@@ -442,9 +321,9 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, ch
                 ERRMEM;
             }
         } else if (saddr.ss_family == AF_INET6) {
-            *host = malloc(INET6_ADDRSTRLEN);
+            *host = malloc(40);
             if (*host) {
-                if (!inet_ntop(AF_INET6, ((struct sockaddr_in6 *)&saddr)->sin6_addr.s6_addr, *host, INET6_ADDRSTRLEN)) {
+                if (!inet_ntop(AF_INET6, ((struct sockaddr_in6 *)&saddr)->sin6_addr.s6_addr, *host, 40)) {
                     ERR("inet_ntop failed (%s).", strerror(errno));
                     free(*host);
                     *host = NULL;
@@ -452,15 +331,6 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, ch
 
                 if (port) {
                     *port = ntohs(((struct sockaddr_in6 *)&saddr)->sin6_port);
-                }
-            } else {
-                ERRMEM;
-            }
-        } else if (saddr.ss_family == AF_UNIX) {
-            *host = strdup(((struct sockaddr_un *)&saddr)->sun_path);
-            if (*host) {
-                if (port) {
-                    *port = 0;
                 }
             } else {
                 ERRMEM;
@@ -495,7 +365,6 @@ nc_clb_default_get_schema(struct lyd_node *rpc, struct nc_session *UNUSED(sessio
             format = ((struct lyd_node_leaf_list *)child)->value_str;
         }
     }
-    VRB("Schema \"%s\" was requested.", identifier);
 
     /* check version */
     if (version && (strlen(version) != 10) && strcmp(version, "1.0")) {
@@ -505,7 +374,7 @@ nc_clb_default_get_schema(struct lyd_node *rpc, struct nc_session *UNUSED(sessio
     }
 
     /* check and get module with the name identifier */
-    module = ly_ctx_get_module(server_opts.ctx, identifier, version, 0);
+    module = ly_ctx_get_module(server_opts.ctx, identifier, version);
     if (!module) {
         module = (const struct lys_module *)ly_ctx_get_submodule(server_opts.ctx, NULL, NULL, identifier, version);
     }
@@ -517,9 +386,9 @@ nc_clb_default_get_schema(struct lyd_node *rpc, struct nc_session *UNUSED(sessio
 
     /* check format */
     if (!format || !strcmp(format, "ietf-netconf-monitoring:yang")) {
-        lys_print_mem(&model_data, module, LYS_OUT_YANG, NULL, 0, 0);
+        lys_print_mem(&model_data, module, LYS_OUT_YANG, NULL);
     } else if (!strcmp(format, "ietf-netconf-monitoring:yin")) {
-        lys_print_mem(&model_data, module, LYS_OUT_YIN, NULL, 0, 0);
+        lys_print_mem(&model_data, module, LYS_OUT_YIN, NULL);
     } else {
         err = nc_err(NC_ERR_INVALID_VALUE, NC_ERR_TYPE_APP);
         nc_err_set_msg(err, "The requested format is not supported.", "en");
@@ -530,7 +399,7 @@ nc_clb_default_get_schema(struct lyd_node *rpc, struct nc_session *UNUSED(sessio
         return NULL;
     }
 
-    sdata = ly_ctx_get_node(server_opts.ctx, NULL, "/ietf-netconf-monitoring:get-schema/data", 1);
+    sdata = ly_ctx_get_node(server_opts.ctx, NULL, "/ietf-netconf-monitoring:get-schema/output/data");
     if (!sdata) {
         ERRINT;
         free(model_data);
@@ -559,7 +428,6 @@ API int
 nc_server_init(struct ly_ctx *ctx)
 {
     const struct lys_node *rpc;
-    pthread_rwlockattr_t  attr;
 
     if (!ctx) {
         ERRARG("ctx");
@@ -569,13 +437,13 @@ nc_server_init(struct ly_ctx *ctx)
     nc_init();
 
     /* set default <get-schema> callback if not specified */
-    rpc = ly_ctx_get_node(ctx, NULL, "/ietf-netconf-monitoring:get-schema", 0);
+    rpc = ly_ctx_get_node(ctx, NULL, "/ietf-netconf-monitoring:get-schema");
     if (rpc && !rpc->priv) {
         lys_set_private(rpc, nc_clb_default_get_schema);
     }
 
     /* set default <close-session> callback if not specififed */
-    rpc = ly_ctx_get_node(ctx, NULL, "/ietf-netconf:close-session", 0);
+    rpc = ly_ctx_get_node(ctx, NULL, "/ietf-netconf:close-session");
     if (rpc && !rpc->priv) {
         lys_set_private(rpc, nc_clb_default_close_session);
     }
@@ -583,27 +451,8 @@ nc_server_init(struct ly_ctx *ctx)
     server_opts.ctx = ctx;
 
     server_opts.new_session_id = 1;
-    server_opts.new_client_id = 1;
+    pthread_spin_init(&server_opts.sid_lock, PTHREAD_PROCESS_PRIVATE);
 
-    errno=0;
-
-    if (pthread_rwlockattr_init(&attr) == 0) {
-#if defined(HAVE_PTHREAD_RWLOCKATTR_SETKIND_NP)
-        if (pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP) == 0) {
-            if (pthread_rwlock_init(&server_opts.endpt_lock, &attr) != 0) {
-                ERR("%s: failed to init rwlock(%s).", __FUNCTION__, strerror(errno));
-            }
-            if (pthread_rwlock_init(&server_opts.ch_client_lock, &attr) != 0) {
-                ERR("%s: failed to init rwlock(%s).", __FUNCTION__, strerror(errno));
-            }
-        } else {
-            ERR("%s: failed set attribute (%s).", __FUNCTION__, strerror(errno));
-        }
-#endif
-        pthread_rwlockattr_destroy(&attr);
-    } else {
-        ERR("%s: failed init attribute (%s).", __FUNCTION__, strerror(errno));
-    }
     return 0;
 }
 
@@ -616,39 +465,25 @@ nc_server_destroy(void)
         lydict_remove(server_opts.ctx, server_opts.capabilities[i]);
     }
     free(server_opts.capabilities);
-    server_opts.capabilities = NULL;
-    server_opts.capabilities_count = 0;
+    pthread_spin_destroy(&server_opts.sid_lock);
 
 #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
     nc_server_del_endpt(NULL, 0);
-    nc_server_ch_del_client(NULL);
 #endif
 #ifdef NC_ENABLED_SSH
-    if (server_opts.passwd_auth_data && server_opts.passwd_auth_data_free) {
-        server_opts.passwd_auth_data_free(server_opts.passwd_auth_data);
-    }
-    server_opts.passwd_auth_data = NULL;
-    server_opts.passwd_auth_data_free = NULL;
-
     nc_server_ssh_del_authkey(NULL, NULL, 0, NULL);
 
     if (server_opts.hostkey_data && server_opts.hostkey_data_free) {
         server_opts.hostkey_data_free(server_opts.hostkey_data);
     }
-    server_opts.hostkey_data = NULL;
-    server_opts.hostkey_data_free = NULL;
 #endif
 #ifdef NC_ENABLED_TLS
     if (server_opts.server_cert_data && server_opts.server_cert_data_free) {
         server_opts.server_cert_data_free(server_opts.server_cert_data);
     }
-    server_opts.server_cert_data = NULL;
-    server_opts.server_cert_data_free = NULL;
     if (server_opts.trusted_cert_list_data && server_opts.trusted_cert_list_data_free) {
         server_opts.trusted_cert_list_data_free(server_opts.trusted_cert_list_data);
     }
-    server_opts.trusted_cert_list_data = NULL;
-    server_opts.trusted_cert_list_data_free = NULL;
 #endif
     nc_destroy();
 }
@@ -735,7 +570,6 @@ API NC_MSG_TYPE
 nc_accept_inout(int fdin, int fdout, const char *username, struct nc_session **session)
 {
     NC_MSG_TYPE msgtype;
-    struct timespec ts_cur;
 
     if (!server_opts.ctx) {
         ERRINIT;
@@ -755,12 +589,18 @@ nc_accept_inout(int fdin, int fdout, const char *username, struct nc_session **s
     }
 
     /* prepare session structure */
-    *session = nc_new_session(NC_SERVER, 0);
+    *session = nc_new_session(0);
     if (!(*session)) {
         ERRMEM;
         return NC_MSG_ERROR;
     }
     (*session)->status = NC_STATUS_STARTING;
+    (*session)->side = NC_SERVER;
+
+    /* transport lock */
+    pthread_mutex_init((*session)->ti_lock, NULL);
+    pthread_cond_init((*session)->ti_cond, NULL);
+    *(*session)->ti_inuse = 0;
 
     /* transport specific data */
     (*session)->ti_type = NC_TI_FD;
@@ -772,97 +612,66 @@ nc_accept_inout(int fdin, int fdout, const char *username, struct nc_session **s
     (*session)->ctx = server_opts.ctx;
 
     /* assign new SID atomically */
-    (*session)->id = ATOMIC_INC(&server_opts.new_session_id);
+    pthread_spin_lock(&server_opts.sid_lock);
+    (*session)->id = server_opts.new_session_id++;
+    pthread_spin_unlock(&server_opts.sid_lock);
 
     /* NETCONF handshake */
-    msgtype = nc_handshake_io(*session);
+    msgtype = nc_handshake(*session);
     if (msgtype != NC_MSG_HELLO) {
         nc_session_free(*session, NULL);
         *session = NULL;
         return msgtype;
     }
-
-    nc_gettimespec_mono(&ts_cur);
-    (*session)->opts.server.last_rpc = ts_cur.tv_sec;
-    nc_gettimespec_real(&ts_cur);
-    (*session)->opts.server.session_start = ts_cur.tv_sec;
-
+    (*session)->opts.server.session_start = (*session)->opts.server.last_rpc = time(NULL);
     (*session)->status = NC_STATUS_RUNNING;
 
     return msgtype;
 }
 
 static void
-nc_ps_queue_add_id(struct nc_pollsession *ps, uint8_t *id)
-{
-    uint8_t q_last;
-
-    if (ps->queue_len == NC_PS_QUEUE_SIZE) {
-        ERRINT;
-        return;
-    }
-
-    /* get a unique queue value (by adding 1 to the last added value, if any) */
-    if (ps->queue_len) {
-        q_last = (ps->queue_begin + ps->queue_len - 1) % NC_PS_QUEUE_SIZE;
-        *id = ps->queue[q_last] + 1;
-    } else {
-        *id = 0;
-    }
-
-    /* add the id into the queue */
-    ++ps->queue_len;
-    q_last = (ps->queue_begin + ps->queue_len - 1) % NC_PS_QUEUE_SIZE;
-    ps->queue[q_last] = *id;
-}
-
-static void
 nc_ps_queue_remove_id(struct nc_pollsession *ps, uint8_t id)
 {
-    uint8_t i, q_idx, found = 0;
+    uint8_t i, found = 0;
 
     for (i = 0; i < ps->queue_len; ++i) {
-        /* get the actual queue idx */
-        q_idx = (ps->queue_begin + i) % NC_PS_QUEUE_SIZE;
+        /* idx round buffer adjust */
+        if (ps->queue_begin + i == NC_PS_QUEUE_SIZE) {
+            i = -ps->queue_begin;
+        }
 
         if (found) {
-            if (ps->queue[q_idx] == id) {
+            /* move the value back one place */
+            if (ps->queue[ps->queue_begin + i] == id) {
                 /* another equal value, simply cannot be */
                 ERRINT;
             }
-            if (found == 2) {
-                /* move the following values */
-                ps->queue[q_idx ? q_idx - 1 : NC_PS_QUEUE_SIZE - 1] = ps->queue[q_idx];
-            }
-        } else if (ps->queue[q_idx] == id) {
-            /* found our id, there can be no more equal valid values */
-            if (i == 0) {
-                found = 1;
+
+            if (ps->queue_begin + i == 0) {
+                ps->queue[NC_PS_QUEUE_SIZE - 1] = ps->queue[ps->queue_begin + i];
             } else {
-                /* this is not okay, our id is in the middle of the queue */
-                found = 2;
+                ps->queue[ps->queue_begin + i - 1] = ps->queue[ps->queue_begin + i];
             }
+        } else if (ps->queue[ps->queue_begin + i] == id) {
+            /* found our id, there can be no more equal valid values */
+            found = 1;
         }
     }
+
     if (!found) {
         ERRINT;
-        return;
     }
-
     --ps->queue_len;
-    if (found == 1) {
-        /* remove the id by moving the queue, otherwise all the values in the queue were moved */
-        ps->queue_begin = (ps->queue_begin + 1) % NC_PS_QUEUE_SIZE;
-    }
 }
 
 int
 nc_ps_lock(struct nc_pollsession *ps, uint8_t *id, const char *func)
 {
     int ret;
+    uint8_t queue_last;
     struct timespec ts;
 
-    nc_gettimespec_real(&ts);
+    nc_gettimespec(&ts);
     nc_addtimespec(&ts, NC_PS_LOCK_TIMEOUT);
 
     /* LOCK */
@@ -872,34 +681,37 @@ nc_ps_lock(struct nc_pollsession *ps, uint8_t *id, const char *func)
         return -1;
     }
 
-    /* check that the queue is long enough */
-    if (ps->queue_len == NC_PS_QUEUE_SIZE) {
-        ERR("%s: pollsession queue size (%d) too small.", func, NC_PS_QUEUE_SIZE);
-        pthread_mutex_unlock(&ps->lock);
-        return -1;
+    /* get a unique queue value (by adding 1 to the last added value, if any) */
+    if (ps->queue_len) {
+        queue_last = ps->queue_begin + ps->queue_len - 1;
+        if (queue_last > NC_PS_QUEUE_SIZE - 1) {
+            queue_last -= NC_PS_QUEUE_SIZE;
+        }
+        *id = ps->queue[queue_last] + 1;
+    } else {
+        *id = 0;
     }
 
     /* add ourselves into the queue */
-    nc_ps_queue_add_id(ps, id);
-    DBG("PS 0x%p TID %lu queue: added %u, head %u, lenght %u", ps, (long unsigned int)pthread_self(), *id,
-            ps->queue[ps->queue_begin], ps->queue_len);
+    if (ps->queue_len == NC_PS_QUEUE_SIZE) {
+        ERR("%s: pollsession queue too small.", func);
+        pthread_mutex_unlock(&ps->lock);
+        return -1;
+    }
+    ++ps->queue_len;
+    queue_last = ps->queue_begin + ps->queue_len - 1;
+    if (queue_last > NC_PS_QUEUE_SIZE - 1) {
+        queue_last -= NC_PS_QUEUE_SIZE;
+    }
+    ps->queue[queue_last] = *id;
 
     /* is it our turn? */
     while (ps->queue[ps->queue_begin] != *id) {
-        nc_gettimespec_real(&ts);
-        nc_addtimespec(&ts, NC_PS_QUEUE_TIMEOUT);
+        nc_gettimespec(&ts);
+        nc_addtimespec(&ts, NC_PS_LOCK_TIMEOUT);
 
         ret = pthread_cond_timedwait(&ps->cond, &ps->lock, &ts);
         if (ret) {
-            /**
-             * This may happen when another thread releases the lock and broadcasts the condition
-             * and this thread had already timed out. When this thread is scheduled, it returns timed out error
-             * but when actually this thread was ready for condition.
-             */
-            if ((ETIMEDOUT == ret) && (ps->queue[ps->queue_begin] == *id)) {
-                break;
-            }
-
             ERR("%s: failed to wait for a pollsession condition (%s).", func, strerror(ret));
             /* remove ourselves from the queue */
             nc_ps_queue_remove_id(ps, *id);
@@ -920,7 +732,7 @@ nc_ps_unlock(struct nc_pollsession *ps, uint8_t id, const char *func)
     int ret;
     struct timespec ts;
 
-    nc_gettimespec_real(&ts);
+    nc_gettimespec(&ts);
     nc_addtimespec(&ts, NC_PS_LOCK_TIMEOUT);
 
     /* LOCK */
@@ -942,8 +754,6 @@ nc_ps_unlock(struct nc_pollsession *ps, uint8_t id, const char *func)
 
     /* remove ourselves from the queue */
     nc_ps_queue_remove_id(ps, id);
-    DBG("PS 0x%p TID %lu queue: removed %u, head %u, lenght %u", ps, (long unsigned int)pthread_self(), id,
-            ps->queue[ps->queue_begin], ps->queue_len);
 
     /* broadcast to all other threads that the queue moved */
     pthread_cond_broadcast(&ps->cond);
@@ -975,18 +785,12 @@ nc_ps_new(void)
 API void
 nc_ps_free(struct nc_pollsession *ps)
 {
-    uint16_t i;
-
     if (!ps) {
         return;
     }
 
     if (ps->queue_len) {
         ERR("FATAL: Freeing a pollsession structure that is currently being worked with!");
-    }
-
-    for (i = 0; i < ps->session_count; i++) {
-        free(ps->sessions[i]);
     }
 
     free(ps->sessions);
@@ -1022,16 +826,8 @@ nc_ps_add_session(struct nc_pollsession *ps, struct nc_session *session)
         nc_ps_unlock(ps, q_id, __func__);
         return -1;
     }
-    ps->sessions[ps->session_count - 1] = calloc(1, sizeof **ps->sessions);
-    if (!ps->sessions[ps->session_count - 1]) {
-        ERRMEM;
-        --ps->session_count;
-        /* UNLOCK */
-        nc_ps_unlock(ps, q_id, __func__);
-        return -1;
-    }
-    ps->sessions[ps->session_count - 1]->session = session;
-    ps->sessions[ps->session_count - 1]->state = NC_PS_STATE_NONE;
+    ps->sessions[ps->session_count - 1].session = session;
+    ps->sessions[ps->session_count - 1].state = NC_PS_STATE_NONE;
 
     /* UNLOCK */
     return nc_ps_unlock(ps, q_id, __func__);
@@ -1047,14 +843,12 @@ _nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session, int in
         goto remove;
     }
     for (i = 0; i < ps->session_count; ++i) {
-        if (ps->sessions[i]->session == session) {
+        if (ps->sessions[i].session == session) {
 remove:
             --ps->session_count;
-            if (i <= ps->session_count) {
-                free(ps->sessions[i]);
+            if (i < ps->session_count) {
                 ps->sessions[i] = ps->sessions[ps->session_count];
-            }
-            if (!ps->session_count) {
+            } else if (!ps->session_count) {
                 free(ps->sessions);
                 ps->sessions = NULL;
             }
@@ -1094,9 +888,10 @@ nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session)
 }
 
 API struct nc_session *
-nc_ps_get_session(const struct nc_pollsession *ps, uint16_t idx)
+nc_ps_get_session_by_sid(const struct nc_pollsession *ps, uint32_t sid)
 {
     uint8_t q_id;
+    uint16_t i;
     struct nc_session *ret = NULL;
 
     if (!ps) {
@@ -1109,8 +904,11 @@ nc_ps_get_session(const struct nc_pollsession *ps, uint16_t idx)
         return NULL;
     }
 
-    if (idx < ps->session_count) {
-        ret = ps->sessions[idx]->session;
+    for (i = 0; i < ps->session_count; ++i) {
+        if (ps->sessions[i].session->id == sid) {
+            ret = ps->sessions[i].session;
+            break;
+        }
     }
 
     /* UNLOCK */
@@ -1122,35 +920,22 @@ nc_ps_get_session(const struct nc_pollsession *ps, uint16_t idx)
 API uint16_t
 nc_ps_session_count(struct nc_pollsession *ps)
 {
-    uint8_t q_id;
-    uint16_t session_count;
-
     if (!ps) {
         ERRARG("ps");
         return 0;
     }
 
-    /* LOCK (just for memory barrier so that we read the current value) */
-    if (nc_ps_lock((struct nc_pollsession *)ps, &q_id, __func__)) {
-        return 0;
-    }
-
-    session_count = ps->session_count;
-
-    /* UNLOCK */
-    nc_ps_unlock((struct nc_pollsession *)ps, q_id, __func__);
-
-    return session_count;
+    return ps->session_count;
 }
 
-/* should be called holding the session RPC lock! IO lock will be acquired as needed
+/* must be called holding the session lock!
  * returns: NC_PSPOLL_ERROR,
  *          NC_PSPOLL_BAD_RPC,
  *          NC_PSPOLL_BAD_RPC | NC_PSPOLL_REPLY_ERROR,
  *          NC_PSPOLL_RPC
  */
 static int
-nc_server_recv_rpc_io(struct nc_session *session, int io_timeout, struct nc_server_rpc **rpc)
+nc_server_recv_rpc(struct nc_session *session, struct nc_server_rpc **rpc)
 {
     struct lyxml_elem *xml = NULL;
     NC_MSG_TYPE msgtype;
@@ -1168,7 +953,7 @@ nc_server_recv_rpc_io(struct nc_session *session, int io_timeout, struct nc_serv
         return NC_PSPOLL_ERROR;
     }
 
-    msgtype = nc_read_msg_io(session, io_timeout, &xml, 0);
+    msgtype = nc_read_msg(session, &xml);
 
     switch (msgtype) {
     case NC_MSG_RPC:
@@ -1183,8 +968,8 @@ nc_server_recv_rpc_io(struct nc_session *session, int io_timeout, struct nc_serv
                                      LYD_OPT_RPC | LYD_OPT_DESTRUCT | LYD_OPT_NOEXTDEPS | LYD_OPT_STRICT, NULL);
         if (!(*rpc)->tree) {
             /* parsing RPC failed */
-            reply = nc_server_reply_err(nc_err_libyang(server_opts.ctx));
-            ret = nc_write_msg_io(session, io_timeout, NC_MSG_REPLY, xml, reply);
+            reply = nc_server_reply_err(nc_err_libyang());
+            ret = nc_write_msg(session, NC_MSG_REPLY, xml, reply);
             nc_server_reply_free(reply);
             if (ret == -1) {
                 ERR("Session %u: failed to write reply.", session->id);
@@ -1209,7 +994,7 @@ nc_server_recv_rpc_io(struct nc_session *session, int io_timeout, struct nc_serv
         goto error;
     default:
         /* NC_MSG_ERROR,
-         * NC_MSG_WOULDBLOCK and NC_MSG_NONE is not returned by nc_read_msg_io()
+         * NC_MSG_WOULDBLOCK and NC_MSG_NONE is not returned by nc_read_msg()
          */
         ret = NC_PSPOLL_ERROR;
         break;
@@ -1233,7 +1018,8 @@ nc_set_global_rpc_clb(nc_rpc_clb clb)
 API NC_MSG_TYPE
 nc_server_notif_send(struct nc_session *session, struct nc_server_notif *notif, int timeout)
 {
-    NC_MSG_TYPE ret;
+    NC_MSG_TYPE result = NC_MSG_NOTIF;
+    int ret;
 
     /* check parameters */
     if (!session || (session->side != NC_SERVER) || !session->opts.server.ntf_status) {
@@ -1244,30 +1030,39 @@ nc_server_notif_send(struct nc_session *session, struct nc_server_notif *notif, 
         return NC_MSG_ERROR;
     }
 
-    /* we do not need RPC lock for this, IO lock will be acquired properly */
-    ret = nc_write_msg_io(session, timeout, NC_MSG_NOTIF, notif);
-    if (ret == NC_MSG_ERROR) {
-        ERR("Session %u: failed to write notification.", session->id);
+    /* reading an RPC and sending a reply must be atomic (no other RPC should be read) */
+    ret = nc_session_lock(session, timeout, __func__);
+    if (ret < 0) {
+        return NC_MSG_ERROR;
+    } else if (!ret) {
+        return NC_MSG_WOULDBLOCK;
     }
 
-    return ret;
+    ret = nc_write_msg(session, NC_MSG_NOTIF, notif);
+    if (ret == -1) {
+        ERR("Session %u: failed to write notification.", session->id);
+        result = NC_MSG_ERROR;
+    }
+
+    nc_session_unlock(session, timeout, __func__);
+
+    return result;
 }
 
-/* must be called holding the session RPC lock! IO lock will be acquired as needed
+/* must be called holding the session lock!
  * returns: NC_PSPOLL_ERROR,
  *          NC_PSPOLL_ERROR | NC_PSPOLL_REPLY_ERROR,
  *          NC_PSPOLL_REPLY_ERROR,
  *          0
  */
 static int
-nc_server_send_reply_io(struct nc_session *session, int io_timeout, struct nc_server_rpc *rpc)
+nc_server_send_reply(struct nc_session *session, struct nc_server_rpc *rpc)
 {
     nc_rpc_clb clb;
     struct nc_server_reply *reply;
     struct lys_node *rpc_act = NULL;
     struct lyd_node *next, *elem;
-    int ret = 0;
-    NC_MSG_TYPE r;
+    int ret = 0, r;
 
     if (!rpc) {
         ERRINT;
@@ -1293,12 +1088,8 @@ nc_server_send_reply_io(struct nc_session *session, int io_timeout, struct nc_se
     }
 
     if (!rpc_act->priv) {
-        if (!global_rpc_clb) {
-            /* no callback, reply with a not-implemented error */
-            reply = nc_server_reply_err(nc_err(NC_ERR_OP_NOT_SUPPORTED, NC_ERR_TYPE_PROT));
-        } else {
-          reply = global_rpc_clb(rpc->tree, session);
-        }
+        /* no callback, reply with a not-implemented error */
+        reply = nc_server_reply_err(nc_err(NC_ERR_OP_NOT_SUPPORTED, NC_ERR_TYPE_PROT));
     } else {
         clb = (nc_rpc_clb)rpc_act->priv;
         reply = clb(rpc->tree, session);
@@ -1307,13 +1098,13 @@ nc_server_send_reply_io(struct nc_session *session, int io_timeout, struct nc_se
     if (!reply) {
         reply = nc_server_reply_err(nc_err(NC_ERR_OP_FAILED, NC_ERR_TYPE_APP));
     }
-    r = nc_write_msg_io(session, io_timeout, NC_MSG_REPLY, rpc->root, reply);
+    r = nc_write_msg(session, NC_MSG_REPLY, rpc->root, reply);
     if (reply->type == NC_RPL_ERROR) {
         ret |= NC_PSPOLL_REPLY_ERROR;
     }
     nc_server_reply_free(reply);
 
-    if (r != NC_MSG_REPLY) {
+    if (r == -1) {
         ERR("Session %u: failed to write reply.", session->id);
         ret |= NC_PSPOLL_ERROR;
     }
@@ -1326,7 +1117,7 @@ nc_server_send_reply_io(struct nc_session *session, int io_timeout, struct nc_se
     return ret;
 }
 
-/* session must be running and session RPC lock held!
+/* session must be running and session lock held!
  * returns: NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR, (msg filled)
  *          NC_PSPOLL_ERROR, (msg filled)
  *          NC_PSPOLL_TIMEOUT,
@@ -1335,68 +1126,70 @@ nc_server_send_reply_io(struct nc_session *session, int io_timeout, struct nc_se
  *          NC_PSPOLL_SSH_MSG
  */
 static int
-nc_ps_poll_session_io(struct nc_session *session, int io_timeout, time_t now_mono, char *msg)
+nc_ps_poll_session(struct nc_session *session, time_t now, char *msg)
 {
     struct pollfd pfd;
-    int r, ret = 0;
+    int r, ret;
 #ifdef NC_ENABLED_SSH
     struct nc_session *new;
 #endif
 
     /* check timeout first */
     if (!(session->flags & NC_SESSION_CALLHOME) && !session->opts.server.ntf_status && server_opts.idle_timeout
-            && (now_mono >= session->opts.server.last_rpc + server_opts.idle_timeout)) {
+            && (now >= session->opts.server.last_rpc + server_opts.idle_timeout)) {
         sprintf(msg, "session idle timeout elapsed");
         session->status = NC_STATUS_INVALID;
         session->term_reason = NC_SESSION_TERM_TIMEOUT;
         return NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR;
     }
 
-    r = nc_session_io_lock(session, io_timeout, __func__);
-    if (r < 0) {
-        sprintf(msg, "session IO lock failed to be acquired");
-        return NC_PSPOLL_ERROR;
-    } else if (!r) {
-        return NC_PSPOLL_TIMEOUT;
-    }
-
     switch (session->ti_type) {
 #ifdef NC_ENABLED_SSH
     case NC_TI_LIBSSH:
         r = ssh_channel_poll_timeout(session->ti.libssh.channel, 0, 0);
-        if (r == SSH_EOF) {
-            sprintf(msg, "SSH channel unexpected EOF");
-            session->status = NC_STATUS_INVALID;
-            session->term_reason = NC_SESSION_TERM_DROPPED;
-            ret = NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR;
-        } else if (r == SSH_ERROR) {
-            sprintf(msg, "SSH channel poll error (%s)", ssh_get_error(session->ti.libssh.session));
-            session->status = NC_STATUS_INVALID;
-            session->term_reason = NC_SESSION_TERM_OTHER;
-            ret = NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR;
-        } else if (!r) {
-            if (session->flags & NC_SESSION_SSH_NEW_MSG) {
-                /* new SSH message */
-                session->flags &= ~NC_SESSION_SSH_NEW_MSG;
-                if (session->ti.libssh.next) {
-                    for (new = session->ti.libssh.next; new != session; new = new->ti.libssh.next) {
-                        if ((new->status == NC_STATUS_STARTING) && new->ti.libssh.channel
-                                && (new->flags & NC_SESSION_SSH_SUBSYS_NETCONF)) {
-                            /* new NETCONF SSH channel */
-                            ret = NC_PSPOLL_SSH_CHANNEL;
-                            break;
-                        }
-                    }
-                    if (new != session) {
-                        break;
-                    }
-                }
-
-                /* just some SSH message */
-                ret = NC_PSPOLL_SSH_MSG;
+        if (r < 1) {
+            if (r == SSH_EOF) {
+                sprintf(msg, "SSH channel unexpected EOF");
+                session->status = NC_STATUS_INVALID;
+                session->term_reason = NC_SESSION_TERM_DROPPED;
+                ret = NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR;
+            } else if (r == SSH_ERROR) {
+                sprintf(msg, "SSH channel poll error (%s)", ssh_get_error(session->ti.libssh.session));
+                session->status = NC_STATUS_INVALID;
+                session->term_reason = NC_SESSION_TERM_OTHER;
+                ret = NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR;
             } else {
                 ret = NC_PSPOLL_TIMEOUT;
             }
+            break;
+        }
+
+        /* we have some data, but it may be just an SSH message */
+        r = ssh_execute_message_callbacks(session->ti.libssh.session);
+        if (r != SSH_OK) {
+            sprintf(msg, "failed to receive SSH messages (%s)", ssh_get_error(session->ti.libssh.session));
+            session->status = NC_STATUS_INVALID;
+            session->term_reason = NC_SESSION_TERM_OTHER;
+            ret = NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR;
+        } else if (session->flags & NC_SESSION_SSH_NEW_MSG) {
+            /* new SSH message */
+            session->flags &= ~NC_SESSION_SSH_NEW_MSG;
+            if (session->ti.libssh.next) {
+                for (new = session->ti.libssh.next; new != session; new = new->ti.libssh.next) {
+                    if ((new->status == NC_STATUS_STARTING) && new->ti.libssh.channel
+                            && (new->flags & NC_SESSION_SSH_SUBSYS_NETCONF)) {
+                        /* new NETCONF SSH channel */
+                        ret = NC_PSPOLL_SSH_CHANNEL;
+                        break;
+                    }
+                }
+                if (new != session) {
+                    break;
+                }
+            }
+
+            /* just some SSH message */
+            ret = NC_PSPOLL_SSH_MSG;
         } else {
             /* we have some application data */
             ret = NC_PSPOLL_RPC;
@@ -1445,8 +1238,7 @@ nc_ps_poll_session_io(struct nc_session *session, int io_timeout, time_t now_mon
         break;
 #endif
     case NC_TI_FD:
-    case NC_TI_UNIX:
-        pfd.fd = (session->ti_type == NC_TI_FD) ? session->ti.fd.in : session->ti.unixsock.sock;
+        pfd.fd = session->ti.fd.in;
         pfd.events = POLLIN;
         pfd.revents = 0;
         r = poll(&pfd, 1, 0);
@@ -1479,7 +1271,6 @@ nc_ps_poll_session_io(struct nc_session *session, int io_timeout, time_t now_mon
         break;
     }
 
-    nc_session_io_unlock(session, __func__);
     return ret;
 }
 
@@ -1492,7 +1283,6 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout, struct nc_session **session)
     char msg[256];
     struct timespec ts_timeout, ts_cur;
     struct nc_session *cur_session;
-    struct nc_ps_session *cur_ps_session;
     struct nc_server_rpc *rpc = NULL;
 
     if (!ps) {
@@ -1511,9 +1301,9 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout, struct nc_session **session)
     }
 
     /* fill timespecs */
-    nc_gettimespec_mono(&ts_cur);
+    nc_gettimespec(&ts_cur);
     if (timeout > -1) {
-        nc_gettimespec_mono(&ts_timeout);
+        nc_gettimespec(&ts_timeout);
         nc_addtimespec(&ts_timeout, timeout);
     }
 
@@ -1526,37 +1316,35 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout, struct nc_session **session)
             i = j = ps->last_event_session + 1;
         }
         do {
-            cur_ps_session = ps->sessions[i];
-            cur_session = cur_ps_session->session;
+            cur_session = ps->sessions[i].session;
 
-            /* SESSION RPC LOCK */
-            r = nc_session_rpc_lock(cur_session, 0, __func__);
+            /* SESSION LOCK */
+            r = nc_session_lock(cur_session, 0, __func__);
             if (r == -1) {
                 ret = NC_PSPOLL_ERROR;
             } else if (r == 1) {
                 /* no one else is currently working with the session, so we can, otherwise skip it */
-                switch (cur_ps_session->state) {
-                case NC_PS_STATE_NONE:
+                if (ps->sessions[i].state == NC_PS_STATE_NONE) {
                     if (cur_session->status == NC_STATUS_RUNNING) {
                         /* session is fine, work with it */
-                        cur_ps_session->state = NC_PS_STATE_BUSY;
+                        ps->sessions[i].state = NC_PS_STATE_BUSY;
 
-                        ret = nc_ps_poll_session_io(cur_session, NC_SESSION_LOCK_TIMEOUT, ts_cur.tv_sec, msg);
+                        ret = nc_ps_poll_session(cur_session, ts_cur.tv_sec, msg);
                         switch (ret) {
                         case NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR:
                             ERR("Session %u: %s.", cur_session->id, msg);
-                            cur_ps_session->state = NC_PS_STATE_INVALID;
+                            ps->sessions[i].state = NC_PS_STATE_INVALID;
                             break;
                         case NC_PSPOLL_ERROR:
                             ERR("Session %u: %s.", cur_session->id, msg);
-                            cur_ps_session->state = NC_PS_STATE_NONE;
+                            ps->sessions[i].state = NC_PS_STATE_NONE;
                             break;
                         case NC_PSPOLL_TIMEOUT:
 #ifdef NC_ENABLED_SSH
                         case NC_PSPOLL_SSH_CHANNEL:
                         case NC_PSPOLL_SSH_MSG:
 #endif
-                            cur_ps_session->state = NC_PS_STATE_NONE;
+                            ps->sessions[i].state = NC_PS_STATE_NONE;
                             break;
                         case NC_PSPOLL_RPC:
                             /* let's keep the state busy, we are not done with this session */
@@ -1568,24 +1356,17 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout, struct nc_session **session)
                         if (cur_session->term_reason != NC_SESSION_TERM_CLOSED) {
                             ret |= NC_PSPOLL_SESSION_ERROR;
                         }
-                        cur_ps_session->state = NC_PS_STATE_INVALID;
+                        ps->sessions[i].state = NC_PS_STATE_INVALID;
                     }
-                    break;
-                case NC_PS_STATE_BUSY:
+                } else if (ps->sessions[i].state == NC_PS_STATE_BUSY) {
                     /* it definitely should not be busy because we have the lock */
                     ERRINT;
-                    ret = NC_PSPOLL_ERROR;
-                    break;
-                case NC_PS_STATE_INVALID:
-                    /* we got it locked, but it will be freed, let it be */
-                    ret = NC_PSPOLL_TIMEOUT;
-                    break;
                 }
 
-                /* keep RPC lock in this one case */
+                /* keep the session locked only in this one case */
                 if (ret != NC_PSPOLL_RPC) {
-                    /* SESSION RPC UNLOCK */
-                    nc_session_rpc_unlock(cur_session, NC_SESSION_LOCK_TIMEOUT, __func__);
+                    /* SESSION UNLOCK */
+                    nc_session_unlock(cur_session, NC_SESSION_LOCK_TIMEOUT, __func__);
                 }
             } else {
                 /* timeout */
@@ -1608,7 +1389,7 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout, struct nc_session **session)
         if (ret == NC_PSPOLL_TIMEOUT) {
             usleep(NC_TIMEOUT_STEP);
             /* update current time */
-            nc_gettimespec_mono(&ts_cur);
+            nc_gettimespec(&ts_cur);
 
             if ((timeout > -1) && (nc_difftimespec(&ts_cur, &ts_timeout) < 1)) {
                 /* final timeout */
@@ -1638,35 +1419,36 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout, struct nc_session **session)
     /* PS UNLOCK */
     nc_ps_unlock(ps, q_id, __func__);
 
-    /* we have some data available and the session is RPC locked (but not IO locked) */
+    /* we have some data available and the session is locked */
     if (ret == NC_PSPOLL_RPC) {
-        ret = nc_server_recv_rpc_io(cur_session, timeout, &rpc);
+        ret = nc_server_recv_rpc(cur_session, &rpc);
         if (ret & (NC_PSPOLL_ERROR | NC_PSPOLL_BAD_RPC)) {
             if (cur_session->status != NC_STATUS_RUNNING) {
                 ret |= NC_PSPOLL_SESSION_TERM | NC_PSPOLL_SESSION_ERROR;
-                cur_ps_session->state = NC_PS_STATE_INVALID;
+                ps->sessions[i].state = NC_PS_STATE_INVALID;
             } else {
-                cur_ps_session->state = NC_PS_STATE_NONE;
+                ps->sessions[i].state = NC_PS_STATE_NONE;
             }
         } else {
-            cur_session->opts.server.last_rpc = ts_cur.tv_sec;
+            cur_session->opts.server.last_rpc = time(NULL);
 
-            /* process RPC */
-            ret |= nc_server_send_reply_io(cur_session, timeout, rpc);
+            /* process RPC, not needed afterwards */
+            ret |= nc_server_send_reply(cur_session, rpc);
+            nc_server_rpc_free(rpc, server_opts.ctx);
+
             if (cur_session->status != NC_STATUS_RUNNING) {
                 ret |= NC_PSPOLL_SESSION_TERM;
                 if (!(cur_session->term_reason & (NC_SESSION_TERM_CLOSED | NC_SESSION_TERM_KILLED))) {
                     ret |= NC_PSPOLL_SESSION_ERROR;
                 }
-                cur_ps_session->state = NC_PS_STATE_INVALID;
+                ps->sessions[i].state = NC_PS_STATE_INVALID;
             } else {
-                cur_ps_session->state = NC_PS_STATE_NONE;
+                ps->sessions[i].state = NC_PS_STATE_NONE;
             }
         }
-        nc_server_rpc_free(rpc, server_opts.ctx);
 
-        /* SESSION RPC UNLOCK */
-        nc_session_rpc_unlock(cur_session, NC_SESSION_LOCK_TIMEOUT, __func__);
+        /* SESSION UNLOCK */
+        nc_session_unlock(cur_session, NC_SESSION_LOCK_TIMEOUT, __func__);
     }
 
     return ret;
@@ -1691,8 +1473,7 @@ nc_ps_clear(struct nc_pollsession *ps, int all, void (*data_free)(void *))
 
     if (all) {
         for (i = 0; i < ps->session_count; i++) {
-            nc_session_free(ps->sessions[i]->session, data_free);
-            free(ps->sessions[i]);
+            nc_session_free(ps->sessions[i].session, data_free);
         }
         free(ps->sessions);
         ps->sessions = NULL;
@@ -1700,8 +1481,8 @@ nc_ps_clear(struct nc_pollsession *ps, int all, void (*data_free)(void *))
         ps->last_event_session = 0;
     } else {
         for (i = 0; i < ps->session_count; ) {
-            if (ps->sessions[i]->session->status != NC_STATUS_RUNNING) {
-                session = ps->sessions[i]->session;
+            if (ps->sessions[i].session->status != NC_STATUS_RUNNING) {
+                session = ps->sessions[i].session;
                 _nc_ps_del_session(ps, NULL, i);
                 nc_session_free(session, data_free);
                 continue;
@@ -1716,45 +1497,6 @@ nc_ps_clear(struct nc_pollsession *ps, int all, void (*data_free)(void *))
 }
 
 #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
-
-static int
-nc_accept_unix(struct nc_session *session, int sock)
-{
-    const struct passwd *pw;
-    struct ucred ucred;
-    char *username;
-    socklen_t len;
-
-    session->ti_type = NC_TI_UNIX;
-
-    len = sizeof(ucred);
-    if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0) {
-        ERR("Failed to get credentials from unix socket (%s).",
-            strerror(errno));
-        close(sock);
-        return -1;
-    }
-
-    pw = getpwuid(ucred.uid);
-    if (pw == NULL) {
-        ERR("Failed to find username for uid=%u (%s).\n", ucred.uid,
-            strerror(errno));
-        close(sock);
-        return -1;
-    }
-
-    username = strdup(pw->pw_name);
-    if (username == NULL) {
-        ERRMEM;
-        close(sock);
-        return -1;
-    }
-    session->username = lydict_insert_zc(server_opts.ctx, username);
-
-    session->ti.unixsock.sock = sock;
-
-    return 1;
-}
 
 API int
 nc_server_add_endpt(const char *name, NC_TRANSPORT_IMPL ti)
@@ -1789,12 +1531,8 @@ nc_server_add_endpt(const char *name, NC_TRANSPORT_IMPL ti)
         ret = -1;
         goto cleanup;
     }
-    memset(&server_opts.endpts[server_opts.endpt_count - 1], 0, sizeof *server_opts.endpts);
     server_opts.endpts[server_opts.endpt_count - 1].name = lydict_insert(server_opts.ctx, name, 0);
     server_opts.endpts[server_opts.endpt_count - 1].ti = ti;
-    server_opts.endpts[server_opts.endpt_count - 1].ka.idle_time = 1;
-    server_opts.endpts[server_opts.endpt_count - 1].ka.max_probes = 10;
-    server_opts.endpts[server_opts.endpt_count - 1].ka.probe_interval = 5;
 
     server_opts.binds = nc_realloc(server_opts.binds, server_opts.endpt_count * sizeof *server_opts.binds);
     if (!server_opts.binds) {
@@ -1803,8 +1541,10 @@ nc_server_add_endpt(const char *name, NC_TRANSPORT_IMPL ti)
         goto cleanup;
     }
 
-    memset(&server_opts.binds[server_opts.endpt_count - 1], 0, sizeof *server_opts.binds);
+    server_opts.binds[server_opts.endpt_count - 1].address = NULL;
+    server_opts.binds[server_opts.endpt_count - 1].port = 0;
     server_opts.binds[server_opts.endpt_count - 1].sock = -1;
+    server_opts.binds[server_opts.endpt_count - 1].pollin = 0;
 
     switch (ti) {
 #ifdef NC_ENABLED_SSH
@@ -1818,7 +1558,7 @@ nc_server_add_endpt(const char *name, NC_TRANSPORT_IMPL ti)
         server_opts.endpts[server_opts.endpt_count - 1].opts.ssh->auth_methods =
             NC_SSH_AUTH_PUBLICKEY | NC_SSH_AUTH_PASSWORD | NC_SSH_AUTH_INTERACTIVE;
         server_opts.endpts[server_opts.endpt_count - 1].opts.ssh->auth_attempts = 3;
-        server_opts.endpts[server_opts.endpt_count - 1].opts.ssh->auth_timeout = 30;
+        server_opts.endpts[server_opts.endpt_count - 1].opts.ssh->auth_timeout = 10;
         break;
 #endif
 #ifdef NC_ENABLED_TLS
@@ -1831,17 +1571,6 @@ nc_server_add_endpt(const char *name, NC_TRANSPORT_IMPL ti)
         }
         break;
 #endif
-    case NC_TI_UNIX:
-        server_opts.endpts[server_opts.endpt_count - 1].opts.unixsock = calloc(1, sizeof(struct nc_server_unix_opts));
-        if (!server_opts.endpts[server_opts.endpt_count - 1].opts.unixsock) {
-            ERRMEM;
-            ret = -1;
-            goto cleanup;
-        }
-        server_opts.endpts[server_opts.endpt_count - 1].opts.unixsock->mode = (mode_t)-1;
-        server_opts.endpts[server_opts.endpt_count - 1].opts.unixsock->uid = (uid_t)-1;
-        server_opts.endpts[server_opts.endpt_count - 1].opts.unixsock->gid = (gid_t)-1;
-        break;
     default:
         ERRINT;
         ret = -1;
@@ -1856,128 +1585,6 @@ cleanup:
     pthread_mutex_unlock(&server_opts.bind_lock);
 
     return ret;
-}
-
-API int
-nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
-{
-    uint32_t i;
-    int ret = -1;
-
-    /* BIND LOCK */
-    pthread_mutex_lock(&server_opts.bind_lock);
-
-    /* ENDPT WRITE LOCK */
-    pthread_rwlock_wrlock(&server_opts.endpt_lock);
-
-    if (!name && !ti) {
-        /* remove all endpoints */
-        for (i = 0; i < server_opts.endpt_count; ++i) {
-            lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
-            switch (server_opts.endpts[i].ti) {
-#ifdef NC_ENABLED_SSH
-            case NC_TI_LIBSSH:
-                nc_server_ssh_clear_opts(server_opts.endpts[i].opts.ssh);
-                free(server_opts.endpts[i].opts.ssh);
-                break;
-#endif
-#ifdef NC_ENABLED_TLS
-            case NC_TI_OPENSSL:
-                nc_server_tls_clear_opts(server_opts.endpts[i].opts.tls);
-                free(server_opts.endpts[i].opts.tls);
-                break;
-#endif
-            case NC_TI_UNIX:
-                free(server_opts.endpts[i].opts.unixsock);
-                break;
-            default:
-                ERRINT;
-                /* won't get here ...*/
-                break;
-            }
-            ret = 0;
-        }
-        free(server_opts.endpts);
-        server_opts.endpts = NULL;
-
-        /* remove all binds */
-        for (i = 0; i < server_opts.endpt_count; ++i) {
-            lydict_remove(server_opts.ctx, server_opts.binds[i].address);
-            if (server_opts.binds[i].sock > -1) {
-                close(server_opts.binds[i].sock);
-            }
-        }
-        free(server_opts.binds);
-        server_opts.binds = NULL;
-
-        server_opts.endpt_count = 0;
-
-    } else {
-        /* remove one endpoint with bind(s) or all endpoints using one transport protocol */
-        for (i = 0; i < server_opts.endpt_count; ++i) {
-            if ((name && !strcmp(server_opts.endpts[i].name, name)) || (!name && (server_opts.endpts[i].ti == ti))) {
-                /* remove endpt */
-                lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
-                switch (server_opts.endpts[i].ti) {
-#ifdef NC_ENABLED_SSH
-                case NC_TI_LIBSSH:
-                    nc_server_ssh_clear_opts(server_opts.endpts[i].opts.ssh);
-                    free(server_opts.endpts[i].opts.ssh);
-                    break;
-#endif
-#ifdef NC_ENABLED_TLS
-                case NC_TI_OPENSSL:
-                    nc_server_tls_clear_opts(server_opts.endpts[i].opts.tls);
-                    free(server_opts.endpts[i].opts.tls);
-                    break;
-#endif
-                case NC_TI_UNIX:
-                    free(server_opts.endpts[i].opts.unixsock);
-                    break;
-                default:
-                    ERRINT;
-                    break;
-                }
-
-                /* remove bind(s) */
-                lydict_remove(server_opts.ctx, server_opts.binds[i].address);
-                if (server_opts.binds[i].sock > -1) {
-                    close(server_opts.binds[i].sock);
-                }
-
-                /* move last endpt and bind(s) to the empty space */
-                --server_opts.endpt_count;
-                if (!server_opts.endpt_count) {
-                    free(server_opts.binds);
-                    server_opts.binds = NULL;
-                    free(server_opts.endpts);
-                    server_opts.endpts = NULL;
-                } else if (i < server_opts.endpt_count) {
-                    memcpy(&server_opts.binds[i], &server_opts.binds[server_opts.endpt_count], sizeof *server_opts.binds);
-                    memcpy(&server_opts.endpts[i], &server_opts.endpts[server_opts.endpt_count], sizeof *server_opts.endpts);
-                }
-
-                ret = 0;
-                if (name) {
-                    break;
-                }
-            }
-        }
-    }
-
-    /* ENDPT UNLOCK */
-    pthread_rwlock_unlock(&server_opts.endpt_lock);
-
-    /* BIND UNLOCK */
-    pthread_mutex_unlock(&server_opts.bind_lock);
-
-    return ret;
-}
-
-API int
-nc_server_endpt_count(void)
-{
-    return server_opts.endpt_count;
 }
 
 int
@@ -2021,18 +1628,10 @@ nc_server_endpt_set_address_port(const char *endpt_name, const char *address, ui
         address = bind->address;
     }
 
-    if (!set_addr && endpt->ti == NC_TI_UNIX) {
-        ret = -1;
-        goto cleanup;
-    }
-
     /* we have all the information we need to create a listening socket */
-    if (address && (port || endpt->ti == NC_TI_UNIX)) {
+    if (address && port) {
         /* create new socket, close the old one */
-        if (endpt->ti == NC_TI_UNIX)
-            sock = nc_sock_listen_unix(address, endpt->opts.unixsock);
-        else
-            sock = nc_sock_listen_inet(address, port, &endpt->ka);
+        sock = nc_sock_listen(address, port);
         if (sock == -1) {
             ret = -1;
             goto cleanup;
@@ -2084,95 +1683,111 @@ nc_server_endpt_set_port(const char *endpt_name, uint16_t port)
 }
 
 API int
-nc_server_endpt_set_perms(const char *endpt_name, mode_t mode, uid_t uid, gid_t gid)
+nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
 {
-    struct nc_endpt *endpt;
-    uint16_t i;
-    int ret = 0;
+    uint32_t i;
+    int ret = -1;
 
-    if (!endpt_name) {
-        ERRARG("endpt_name");
-        return -1;
-    } else if (mode == 0) {
-        ERRARG("mode");
-        return -1;
+    /* BIND LOCK */
+    pthread_mutex_lock(&server_opts.bind_lock);
+
+    /* ENDPT WRITE LOCK */
+    pthread_rwlock_wrlock(&server_opts.endpt_lock);
+
+    if (!name && !ti) {
+        /* remove all endpoints */
+        for (i = 0; i < server_opts.endpt_count; ++i) {
+            lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
+            switch (server_opts.endpts[i].ti) {
+#ifdef NC_ENABLED_SSH
+            case NC_TI_LIBSSH:
+                nc_server_ssh_clear_opts(server_opts.endpts[i].opts.ssh);
+                free(server_opts.endpts[i].opts.ssh);
+                break;
+#endif
+#ifdef NC_ENABLED_TLS
+            case NC_TI_OPENSSL:
+                nc_server_tls_clear_opts(server_opts.endpts[i].opts.tls);
+                free(server_opts.endpts[i].opts.tls);
+                break;
+#endif
+            default:
+                ERRINT;
+                /* won't get here ...*/
+                break;
+            }
+            ret = 0;
+        }
+        free(server_opts.endpts);
+        server_opts.endpts = NULL;
+
+        /* remove all binds */
+        for (i = 0; i < server_opts.endpt_count; ++i) {
+            lydict_remove(server_opts.ctx, server_opts.binds[i].address);
+            if (server_opts.binds[i].sock > -1) {
+                close(server_opts.binds[i].sock);
+            }
+        }
+        free(server_opts.binds);
+        server_opts.binds = NULL;
+
+        server_opts.endpt_count = 0;
+
+    } else {
+        /* remove one endpoint with bind(s) or all endpoints using one transport protocol */
+        for (i = 0; i < server_opts.endpt_count; ++i) {
+            if ((name && !strcmp(server_opts.endpts[i].name, name)) || (!name && (server_opts.endpts[i].ti == ti))) {
+                /* remove endpt */
+                lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
+                switch (server_opts.endpts[i].ti) {
+#ifdef NC_ENABLED_SSH
+                case NC_TI_LIBSSH:
+                    nc_server_ssh_clear_opts(server_opts.endpts[i].opts.ssh);
+                    free(server_opts.endpts[i].opts.ssh);
+                    break;
+#endif
+#ifdef NC_ENABLED_TLS
+                case NC_TI_OPENSSL:
+                    nc_server_tls_clear_opts(server_opts.endpts[i].opts.tls);
+                    free(server_opts.endpts[i].opts.tls);
+                    break;
+#endif
+                default:
+                    ERRINT;
+                    break;
+                }
+
+                /* remove bind(s) */
+                lydict_remove(server_opts.ctx, server_opts.binds[i].address);
+                if (server_opts.binds[i].sock > -1) {
+                    close(server_opts.binds[i].sock);
+                }
+
+                /* move last endpt and bind(s) to the empty space */
+                --server_opts.endpt_count;
+                if (!server_opts.endpt_count) {
+                    free(server_opts.binds);
+                    server_opts.binds = NULL;
+                    free(server_opts.endpts);
+                    server_opts.endpts = NULL;
+                } else if (i < server_opts.endpt_count) {
+                    memcpy(&server_opts.binds[i], &server_opts.binds[server_opts.endpt_count], sizeof *server_opts.binds);
+                    memcpy(&server_opts.endpts[i], &server_opts.endpts[server_opts.endpt_count], sizeof *server_opts.endpts);
+                }
+
+                ret = 0;
+                if (name) {
+                    break;
+                }
+            }
+        }
     }
 
-    /* ENDPT LOCK */
-    endpt = nc_server_endpt_lock_get(endpt_name, 0, &i);
-    if (!endpt)
-        return -1;
-
-    if (endpt->ti != NC_TI_UNIX) {
-        ret = -1;
-        goto cleanup;
-    }
-
-    endpt->opts.unixsock->mode = mode;
-    endpt->opts.unixsock->uid = uid;
-    endpt->opts.unixsock->gid = gid;
-
-cleanup:
     /* ENDPT UNLOCK */
     pthread_rwlock_unlock(&server_opts.endpt_lock);
 
-    return ret;
-}
-
-API int
-nc_server_endpt_enable_keepalives(const char *endpt_name, int enable)
-{
-    struct nc_endpt *endpt;
-    int ret = 0;
-
-    if (!endpt_name) {
-        ERRARG("endpt_name");
-        return -1;
-    }
-
-    /* ENDPT LOCK */
-    endpt = nc_server_endpt_lock_get(endpt_name, 0, NULL);
-    if (!endpt) {
-        return -1;
-    }
-
-    endpt->ka.enabled = (enable ? 1 : 0);
-
-    /* ENDPT UNLOCK */
-    pthread_rwlock_unlock(&server_opts.endpt_lock);
-
-    return ret;
-}
-
-API int
-nc_server_endpt_set_keepalives(const char *endpt_name, int idle_time, int max_probes, int probe_interval)
-{
-    struct nc_endpt *endpt;
-    int ret = 0;
-
-    if (!endpt_name) {
-        ERRARG("endpt_name");
-        return -1;
-    }
-
-    /* ENDPT LOCK */
-    endpt = nc_server_endpt_lock_get(endpt_name, 0, NULL);
-    if (!endpt) {
-        return -1;
-    }
-
-    if (idle_time > -1) {
-        endpt->ka.idle_time = idle_time;
-    }
-    if (max_probes > -1) {
-        endpt->ka.max_probes = max_probes;
-    }
-    if (probe_interval > -1) {
-        endpt->ka.probe_interval = probe_interval;
-    }
-
-    /* ENDPT UNLOCK */
-    pthread_rwlock_unlock(&server_opts.endpt_lock);
+    /* BIND UNLOCK */
+    pthread_mutex_unlock(&server_opts.bind_lock);
 
     return ret;
 }
@@ -2184,7 +1799,6 @@ nc_accept(int timeout, struct nc_session **session)
     int sock, ret;
     char *host = NULL;
     uint16_t port, bind_idx;
-    struct timespec ts_cur;
 
     if (!server_opts.ctx) {
         ERRINIT;
@@ -2224,7 +1838,7 @@ nc_accept(int timeout, struct nc_session **session)
 
     sock = ret;
 
-    *session = nc_new_session(NC_SERVER, 0);
+    *session = nc_new_session(0);
     if (!(*session)) {
         ERRMEM;
         close(sock);
@@ -2233,10 +1847,16 @@ nc_accept(int timeout, struct nc_session **session)
         goto cleanup;
     }
     (*session)->status = NC_STATUS_STARTING;
+    (*session)->side = NC_SERVER;
     (*session)->ctx = server_opts.ctx;
     (*session)->flags = NC_SESSION_SHAREDCTX;
     (*session)->host = lydict_insert_zc(server_opts.ctx, host);
     (*session)->port = port;
+
+    /* transport lock */
+    pthread_mutex_init((*session)->ti_lock, NULL);
+    pthread_cond_init((*session)->ti_cond, NULL);
+    *(*session)->ti_inuse = 0;
 
     /* sock gets assigned to session or closed */
 #ifdef NC_ENABLED_SSH
@@ -2265,14 +1885,7 @@ nc_accept(int timeout, struct nc_session **session)
         }
     } else
 #endif
-    if (server_opts.endpts[bind_idx].ti == NC_TI_UNIX) {
-        (*session)->data = server_opts.endpts[bind_idx].opts.unixsock;
-        ret = nc_accept_unix(*session, sock);
-        if (ret < 0) {
-            msgtype = NC_MSG_ERROR;
-            goto cleanup;
-        }
-    } else {
+    {
         ERRINT;
         close(sock);
         msgtype = NC_MSG_ERROR;
@@ -2285,20 +1898,20 @@ nc_accept(int timeout, struct nc_session **session)
     pthread_rwlock_unlock(&server_opts.endpt_lock);
 
     /* assign new SID atomically */
-    (*session)->id = ATOMIC_INC(&server_opts.new_session_id);
+    /* LOCK */
+    pthread_spin_lock(&server_opts.sid_lock);
+    (*session)->id = server_opts.new_session_id++;
+    /* UNLOCK */
+    pthread_spin_unlock(&server_opts.sid_lock);
 
     /* NETCONF handshake */
-    msgtype = nc_handshake_io(*session);
+    msgtype = nc_handshake(*session);
     if (msgtype != NC_MSG_HELLO) {
         nc_session_free(*session, NULL);
         *session = NULL;
         return msgtype;
     }
-
-    nc_gettimespec_mono(&ts_cur);
-    (*session)->opts.server.last_rpc = ts_cur.tv_sec;
-    nc_gettimespec_real(&ts_cur);
-    (*session)->opts.server.session_start = ts_cur.tv_sec;
+    (*session)->opts.server.session_start = (*session)->opts.server.last_rpc = time(NULL);
     (*session)->status = NC_STATUS_RUNNING;
 
     return msgtype;
@@ -2312,98 +1925,16 @@ cleanup:
     return msgtype;
 }
 
-/* client is expected to be locked */
-static int
-_nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_name, NC_TRANSPORT_IMPL ti)
-{
-    uint16_t i;
-    int ret = -1;
-
-    if (!endpt_name) {
-        /* remove all endpoints */
-        for (i = 0; i < client->ch_endpt_count; ++i) {
-            lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
-            lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
-            if (client->ch_endpts[i].sock_pending != -1) {
-                close(client->ch_endpts[i].sock_pending);
-            }
-            switch (client->ch_endpts[i].ti) {
-#ifdef NC_ENABLED_SSH
-            case NC_TI_LIBSSH:
-                nc_server_ssh_clear_opts(client->ch_endpts[i].opts.ssh);
-                free(client->ch_endpts[i].opts.ssh);
-                break;
-#endif
-#ifdef NC_ENABLED_TLS
-            case NC_TI_OPENSSL:
-                nc_server_tls_clear_opts(client->ch_endpts[i].opts.tls);
-                free(client->ch_endpts[i].opts.tls);
-                break;
-#endif
-            default:
-                ERRINT;
-                /* won't get here ...*/
-                break;
-            }
-        }
-        free(client->ch_endpts);
-        client->ch_endpts = NULL;
-        client->ch_endpt_count = 0;
-
-        ret = 0;
-    } else {
-        for (i = 0; i < client->ch_endpt_count; ++i) {
-            if (!strcmp(client->ch_endpts[i].name, endpt_name) && (!ti || (ti == client->ch_endpts[i].ti))) {
-                lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
-                lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
-                if (client->ch_endpts[i].sock_pending != -1) {
-                    close(client->ch_endpts[i].sock_pending);
-                }
-                switch (client->ch_endpts[i].ti) {
-#ifdef NC_ENABLED_SSH
-                case NC_TI_LIBSSH:
-                    nc_server_ssh_clear_opts(client->ch_endpts[i].opts.ssh);
-                    free(client->ch_endpts[i].opts.ssh);
-                    break;
-#endif
-#ifdef NC_ENABLED_TLS
-                case NC_TI_OPENSSL:
-                    nc_server_tls_clear_opts(client->ch_endpts[i].opts.tls);
-                    free(client->ch_endpts[i].opts.tls);
-                    break;
-#endif
-                default:
-                    ERRINT;
-                    /* won't get here ...*/
-                    break;
-                }
-
-                /* move last endpoint to the empty space */
-                --client->ch_endpt_count;
-                if (i < client->ch_endpt_count) {
-                    memcpy(&client->ch_endpts[i], &client->ch_endpts[client->ch_endpt_count], sizeof *client->ch_endpts);
-                } else if (!server_opts.ch_client_count) {
-                    free(server_opts.ch_clients);
-                    server_opts.ch_clients = NULL;
-                }
-
-                ret = 0;
-                break;
-            }
-        }
-    }
-
-    return ret;
-}
-
 API int
-nc_server_ch_add_client(const char *name)
+nc_server_ch_add_client(const char *name, NC_TRANSPORT_IMPL ti)
 {
     uint16_t i;
-    struct nc_ch_client *client;
 
     if (!name) {
         ERRARG("name");
+        return -1;
+    } else if (!ti) {
+        ERRARG("ti");
         return -1;
     }
 
@@ -2428,19 +1959,52 @@ nc_server_ch_add_client(const char *name)
         pthread_rwlock_unlock(&server_opts.ch_client_lock);
         return -1;
     }
-    client = &server_opts.ch_clients[server_opts.ch_client_count - 1];
+    server_opts.ch_clients[server_opts.ch_client_count - 1].name = lydict_insert(server_opts.ctx, name, 0);
+    server_opts.ch_clients[server_opts.ch_client_count - 1].ti = ti;
+    server_opts.ch_clients[server_opts.ch_client_count - 1].ch_endpts = NULL;
+    server_opts.ch_clients[server_opts.ch_client_count - 1].ch_endpt_count = 0;
 
-    client->name = lydict_insert(server_opts.ctx, name, 0);
-    client->id = ATOMIC_INC(&server_opts.new_client_id);
-    client->ch_endpts = NULL;
-    client->ch_endpt_count = 0;
-    client->conn_type = 0;
+    switch (ti) {
+#ifdef NC_ENABLED_SSH
+    case NC_TI_LIBSSH:
+        server_opts.ch_clients[server_opts.ch_client_count - 1].opts.ssh = calloc(1, sizeof(struct nc_server_ssh_opts));
+        if (!server_opts.ch_clients[server_opts.ch_client_count - 1].opts.ssh) {
+            ERRMEM;
+            /* WRITE UNLOCK */
+            pthread_rwlock_unlock(&server_opts.ch_client_lock);
+            return -1;
+        }
+        server_opts.ch_clients[server_opts.ch_client_count - 1].opts.ssh->auth_methods =
+            NC_SSH_AUTH_PUBLICKEY | NC_SSH_AUTH_PASSWORD | NC_SSH_AUTH_INTERACTIVE;
+        server_opts.ch_clients[server_opts.ch_client_count - 1].opts.ssh->auth_attempts = 3;
+        server_opts.ch_clients[server_opts.ch_client_count - 1].opts.ssh->auth_timeout = 10;
+        break;
+#endif
+#ifdef NC_ENABLED_TLS
+    case NC_TI_OPENSSL:
+        server_opts.ch_clients[server_opts.ch_client_count - 1].opts.tls = calloc(1, sizeof(struct nc_server_tls_opts));
+        if (!server_opts.ch_clients[server_opts.ch_client_count - 1].opts.tls) {
+            ERRMEM;
+            /* WRITE UNLOCK */
+            pthread_rwlock_unlock(&server_opts.ch_client_lock);
+            return -1;
+        }
+        break;
+#endif
+    default:
+        ERRINT;
+        /* WRITE UNLOCK */
+        pthread_rwlock_unlock(&server_opts.ch_client_lock);
+        return -1;
+    }
+
+    server_opts.ch_clients[server_opts.ch_client_count - 1].conn_type = 0;
 
     /* set CH default options */
-    client->start_with = NC_CH_FIRST_LISTED;
-    client->max_attempts = 3;
+    server_opts.ch_clients[server_opts.ch_client_count - 1].start_with = NC_CH_FIRST_LISTED;
+    server_opts.ch_clients[server_opts.ch_client_count - 1].max_attempts = 3;
 
-    pthread_mutex_init(&client->lock, NULL);
+    pthread_mutex_init(&server_opts.ch_clients[server_opts.ch_client_count - 1].lock, NULL);
 
     /* WRITE UNLOCK */
     pthread_rwlock_unlock(&server_opts.ch_client_lock);
@@ -2449,23 +2013,47 @@ nc_server_ch_add_client(const char *name)
 }
 
 API int
-nc_server_ch_del_client(const char *name)
+nc_server_ch_del_client(const char *name, NC_TRANSPORT_IMPL ti)
 {
-    uint16_t i;
+    uint16_t i, j;
     int ret = -1;
 
     /* WRITE LOCK */
     pthread_rwlock_wrlock(&server_opts.ch_client_lock);
 
-    if (!name) {
-        /* remove all CH clients with endpoints */
+    if (!name && !ti) {
+        /* remove all CH clients */
         for (i = 0; i < server_opts.ch_client_count; ++i) {
             lydict_remove(server_opts.ctx, server_opts.ch_clients[i].name);
 
             /* remove all endpoints */
-            _nc_server_ch_client_del_endpt(&server_opts.ch_clients[i], NULL, 0);
+            for (j = 0; j < server_opts.ch_clients[i].ch_endpt_count; ++j) {
+                lydict_remove(server_opts.ctx, server_opts.ch_clients[i].ch_endpts[j].name);
+                lydict_remove(server_opts.ctx, server_opts.ch_clients[i].ch_endpts[j].address);
+            }
+            free(server_opts.ch_clients[i].ch_endpts);
+
+            switch (server_opts.ch_clients[i].ti) {
+#ifdef NC_ENABLED_SSH
+            case NC_TI_LIBSSH:
+                nc_server_ssh_clear_opts(server_opts.ch_clients[i].opts.ssh);
+                free(server_opts.ch_clients[i].opts.ssh);
+                break;
+#endif
+#ifdef NC_ENABLED_TLS
+            case NC_TI_OPENSSL:
+                nc_server_tls_clear_opts(server_opts.ch_clients[i].opts.tls);
+                free(server_opts.ch_clients[i].opts.tls);
+                break;
+#endif
+            default:
+                ERRINT;
+                /* won't get here ...*/
+                break;
+            }
 
             pthread_mutex_destroy(&server_opts.ch_clients[i].lock);
+
             ret = 0;
         }
         free(server_opts.ch_clients);
@@ -2474,13 +2062,36 @@ nc_server_ch_del_client(const char *name)
         server_opts.ch_client_count = 0;
 
     } else {
-        /* remove one client with endpoints */
+        /* remove one client with endpoint(s) or all clients using one protocol */
         for (i = 0; i < server_opts.ch_client_count; ++i) {
-            if (!strcmp(server_opts.ch_clients[i].name, name)) {
+            if ((name && !strcmp(server_opts.ch_clients[i].name, name)) || (!name && (server_opts.ch_clients[i].ti == ti))) {
+                /* remove endpt */
                 lydict_remove(server_opts.ctx, server_opts.ch_clients[i].name);
 
+                switch (server_opts.ch_clients[i].ti) {
+#ifdef NC_ENABLED_SSH
+                case NC_TI_LIBSSH:
+                    nc_server_ssh_clear_opts(server_opts.ch_clients[i].opts.ssh);
+                    free(server_opts.ch_clients[i].opts.ssh);
+                    break;
+#endif
+#ifdef NC_ENABLED_TLS
+                case NC_TI_OPENSSL:
+                    nc_server_tls_clear_opts(server_opts.ch_clients[i].opts.tls);
+                    free(server_opts.ch_clients[i].opts.tls);
+                    break;
+#endif
+                default:
+                    ERRINT;
+                    break;
+                }
+
                 /* remove all endpoints */
-                _nc_server_ch_client_del_endpt(&server_opts.ch_clients[i], NULL, 0);
+                for (j = 0; j < server_opts.ch_clients[i].ch_endpt_count; ++j) {
+                    lydict_remove(server_opts.ctx, server_opts.ch_clients[i].ch_endpts[j].name);
+                    lydict_remove(server_opts.ctx, server_opts.ch_clients[i].ch_endpts[j].address);
+                }
+                free(server_opts.ch_clients[i].ch_endpts);
 
                 pthread_mutex_destroy(&server_opts.ch_clients[i].lock);
 
@@ -2488,14 +2099,16 @@ nc_server_ch_del_client(const char *name)
                 --server_opts.ch_client_count;
                 if (i < server_opts.ch_client_count) {
                     memcpy(&server_opts.ch_clients[i], &server_opts.ch_clients[server_opts.ch_client_count],
-                            sizeof *server_opts.ch_clients);
+                           sizeof *server_opts.ch_clients);
                 } else if (!server_opts.ch_client_count) {
                     free(server_opts.ch_clients);
                     server_opts.ch_clients = NULL;
                 }
 
                 ret = 0;
-                break;
+                if (name) {
+                    break;
+                }
             }
         }
     }
@@ -2507,12 +2120,10 @@ nc_server_ch_del_client(const char *name)
 }
 
 API int
-nc_server_ch_client_add_endpt(const char *client_name, const char *endpt_name, NC_TRANSPORT_IMPL ti)
+nc_server_ch_client_add_endpt(const char *client_name, const char *endpt_name)
 {
     uint16_t i;
     struct nc_ch_client *client;
-    struct nc_ch_endpt *endpt;
-    int ret = -1;
 
     if (!client_name) {
         ERRARG("client_name");
@@ -2520,13 +2131,10 @@ nc_server_ch_client_add_endpt(const char *client_name, const char *endpt_name, N
     } else if (!endpt_name) {
         ERRARG("endpt_name");
         return -1;
-    } else if (!ti) {
-        ERRARG("ti");
-        return -1;
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
@@ -2534,7 +2142,9 @@ nc_server_ch_client_add_endpt(const char *client_name, const char *endpt_name, N
     for (i = 0; i < client->ch_endpt_count; ++i) {
         if (!strcmp(client->ch_endpts[i].name, endpt_name)) {
             ERR("Call Home client \"%s\" endpoint \"%s\" already exists.", client_name, endpt_name);
-            goto cleanup;
+            /* UNLOCK */
+            nc_server_ch_client_unlock(client);
+            return -1;
         }
     }
 
@@ -2542,59 +2152,26 @@ nc_server_ch_client_add_endpt(const char *client_name, const char *endpt_name, N
     client->ch_endpts = realloc(client->ch_endpts, client->ch_endpt_count * sizeof *client->ch_endpts);
     if (!client->ch_endpts) {
         ERRMEM;
-        goto cleanup;
-    }
-    endpt = &client->ch_endpts[client->ch_endpt_count - 1];
-
-    memset(endpt, 0, sizeof *client->ch_endpts);
-    endpt->name = lydict_insert(server_opts.ctx, endpt_name, 0);
-    endpt->ti = ti;
-    endpt->sock_pending = -1;
-    endpt->ka.idle_time = 1;
-    endpt->ka.max_probes = 10;
-    endpt->ka.probe_interval = 5;
-
-    switch (ti) {
-#ifdef NC_ENABLED_SSH
-    case NC_TI_LIBSSH:
-        endpt->opts.ssh = calloc(1, sizeof(struct nc_server_ssh_opts));
-        if (!endpt->opts.ssh) {
-            ERRMEM;
-            goto cleanup;
-        }
-        endpt->opts.ssh->auth_methods = NC_SSH_AUTH_PUBLICKEY | NC_SSH_AUTH_PASSWORD | NC_SSH_AUTH_INTERACTIVE;
-        endpt->opts.ssh->auth_attempts = 3;
-        endpt->opts.ssh->auth_timeout = 30;
-        break;
-#endif
-#ifdef NC_ENABLED_TLS
-    case NC_TI_OPENSSL:
-        endpt->opts.tls = calloc(1, sizeof(struct nc_server_tls_opts));
-        if (!endpt->opts.tls) {
-            ERRMEM;
-            goto cleanup;
-        }
-        break;
-#endif
-    default:
-        ERRINT;
-        goto cleanup;
+        /* UNLOCK */
+        nc_server_ch_client_unlock(client);
+        return -1;
     }
 
-    /* success */
-    ret = 0;
+    client->ch_endpts[client->ch_endpt_count - 1].name = lydict_insert(server_opts.ctx, endpt_name, 0);
+    client->ch_endpts[client->ch_endpt_count - 1].address = NULL;
+    client->ch_endpts[client->ch_endpt_count - 1].port = 0;
 
-cleanup:
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
 
-    return ret;
+    return 0;
 }
 
 API int
-nc_server_ch_client_del_endpt(const char *client_name, const char *endpt_name, NC_TRANSPORT_IMPL ti)
+nc_server_ch_client_del_endpt(const char *client_name, const char *endpt_name)
 {
-    int ret;
+    uint16_t i;
+    int ret = -1;
     struct nc_ch_client *client;
 
     if (!client_name) {
@@ -2603,12 +2180,42 @@ nc_server_ch_client_del_endpt(const char *client_name, const char *endpt_name, N
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
 
-    ret = _nc_server_ch_client_del_endpt(client, endpt_name, ti);
+    if (!endpt_name) {
+        /* remove all endpoints */
+        for (i = 0; i < client->ch_endpt_count; ++i) {
+            lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
+            lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
+        }
+        free(client->ch_endpts);
+        client->ch_endpts = NULL;
+        client->ch_endpt_count = 0;
+
+        ret = 0;
+    } else {
+        for (i = 0; i < client->ch_endpt_count; ++i) {
+            if (!strcmp(client->ch_endpts[i].name, endpt_name)) {
+                lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
+                lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
+
+                /* move last endpoint to the empty space */
+                --client->ch_endpt_count;
+                if (i < client->ch_endpt_count) {
+                    memcpy(&client->ch_endpts[i], &client->ch_endpts[client->ch_endpt_count], sizeof *client->ch_endpts);
+                } else if (!server_opts.ch_client_count) {
+                    free(server_opts.ch_clients);
+                    server_opts.ch_clients = NULL;
+                }
+
+                ret = 0;
+                break;
+            }
+        }
+    }
 
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
@@ -2619,8 +2226,9 @@ nc_server_ch_client_del_endpt(const char *client_name, const char *endpt_name, N
 API int
 nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt_name, const char *address)
 {
+    uint16_t i;
+    int ret = -1;
     struct nc_ch_client *client;
-    struct nc_ch_endpt *endpt;
 
     if (!client_name) {
         ERRARG("client_name");
@@ -2634,25 +2242,37 @@ nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt
     }
 
     /* LOCK */
-    endpt = nc_server_ch_client_lock(client_name, endpt_name, 0, &client);
-    if (!endpt) {
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
+    if (!client) {
         return -1;
     }
 
-    lydict_remove(server_opts.ctx, endpt->address);
-    endpt->address = lydict_insert(server_opts.ctx, address, 0);
+    for (i = 0; i < client->ch_endpt_count; ++i) {
+        if (!strcmp(client->ch_endpts[i].name, endpt_name)) {
+            lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
+            client->ch_endpts[i].address = lydict_insert(server_opts.ctx, address, 0);
+
+            ret = 0;
+            break;
+        }
+    }
 
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
 
-    return 0;
+    if (ret == -1) {
+        ERR("Call Home client \"%s\" endpoint \"%s\" not found.", client_name, endpt_name);
+    }
+
+    return ret;
 }
 
 API int
 nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_name, uint16_t port)
 {
+    uint16_t i;
+    int ret = -1;
     struct nc_ch_client *client;
-    struct nc_ch_endpt *endpt;
 
     if (!client_name) {
         ERRARG("client_name");
@@ -2666,82 +2286,28 @@ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_na
     }
 
     /* LOCK */
-    endpt = nc_server_ch_client_lock(client_name, endpt_name, 0, &client);
-    if (!endpt) {
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
+    if (!client) {
         return -1;
     }
 
-    endpt->port = port;
+    for (i = 0; i < client->ch_endpt_count; ++i) {
+        if (!strcmp(client->ch_endpts[i].name, endpt_name)) {
+            client->ch_endpts[i].port = port;
 
-    /* UNLOCK */
-    nc_server_ch_client_unlock(client);
-
-    return -1;
-}
-
-API int
-nc_server_ch_client_endpt_enable_keepalives(const char *client_name, const char *endpt_name, int enable)
-{
-    struct nc_ch_client *client;
-    struct nc_ch_endpt *endpt;
-
-    if (!client_name) {
-        ERRARG("client_name");
-        return -1;
-    } else if (!endpt_name) {
-        ERRARG("endpt_name");
-        return -1;
-    }
-
-    /* LOCK */
-    endpt = nc_server_ch_client_lock(client_name, endpt_name, 0, &client);
-    if (!endpt) {
-        return -1;
-    }
-
-    endpt->ka.enabled = (enable ? 1 : 0);
-
-    /* UNLOCK */
-    nc_server_ch_client_unlock(client);
-
-    return 0;
-}
-
-API int
-nc_server_ch_client_endpt_set_keepalives(const char *client_name, const char *endpt_name, int idle_time, int max_probes,
-        int probe_interval)
-{
-    struct nc_ch_client *client;
-    struct nc_ch_endpt *endpt;
-
-    if (!client_name) {
-        ERRARG("client_name");
-        return -1;
-    } else if (!endpt_name) {
-        ERRARG("endpt_name");
-        return -1;
-    }
-
-    /* LOCK */
-    endpt = nc_server_ch_client_lock(client_name, endpt_name, 0, &client);
-    if (!endpt) {
-        return -1;
-    }
-
-    if (idle_time > -1) {
-        endpt->ka.idle_time = idle_time;
-    }
-    if (max_probes > -1) {
-        endpt->ka.max_probes = max_probes;
-    }
-    if (probe_interval > -1) {
-        endpt->ka.probe_interval = probe_interval;
+            ret = 0;
+            break;
+        }
     }
 
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
 
-    return 0;
+    if (ret == -1) {
+        ERR("Call Home client \"%s\" endpoint \"%s\" not found.", client_name, endpt_name);
+    }
+
+    return ret;
 }
 
 API int
@@ -2758,7 +2324,7 @@ nc_server_ch_client_set_conn_type(const char *client_name, NC_CH_CONN_TYPE conn_
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
@@ -2769,12 +2335,13 @@ nc_server_ch_client_set_conn_type(const char *client_name, NC_CH_CONN_TYPE conn_
         /* set default options */
         switch (conn_type) {
         case NC_CH_PERSIST:
-            /* no options */
+            client->conn.persist.idle_timeout = 86400;
+            client->conn.persist.ka_max_wait = 30;
+            client->conn.persist.ka_max_attempts = 3;
             break;
         case NC_CH_PERIOD:
-            client->conn.period.period = 60;
-            client->conn.period.anchor_time = 0;
-            client->conn.period.idle_timeout = 120;
+            client->conn.period.idle_timeout = 300;
+            client->conn.period.reconnect_timeout = 60;
             break;
         default:
             ERRINT;
@@ -2789,32 +2356,29 @@ nc_server_ch_client_set_conn_type(const char *client_name, NC_CH_CONN_TYPE conn_
 }
 
 API int
-nc_server_ch_client_periodic_set_period(const char *client_name, uint16_t period)
+nc_server_ch_client_persist_set_idle_timeout(const char *client_name, uint32_t idle_timeout)
 {
     struct nc_ch_client *client;
 
     if (!client_name) {
         ERRARG("client_name");
         return -1;
-    } else if (!period) {
-        ERRARG("period");
-        return -1;
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
 
-    if (client->conn_type != NC_CH_PERIOD) {
-        ERR("Call Home client \"%s\" is not of periodic connection type.");
+    if (client->conn_type != NC_CH_PERSIST) {
+        ERR("Call Home client \"%s\" is not of persistent connection type.");
         /* UNLOCK */
         nc_server_ch_client_unlock(client);
         return -1;
     }
 
-    client->conn.period.period = period;
+    client->conn.persist.idle_timeout = idle_timeout;
 
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
@@ -2823,29 +2387,32 @@ nc_server_ch_client_periodic_set_period(const char *client_name, uint16_t period
 }
 
 API int
-nc_server_ch_client_periodic_set_anchor_time(const char *client_name, time_t anchor_time)
+nc_server_ch_client_persist_set_keep_alive_max_wait(const char *client_name, uint16_t max_wait)
 {
     struct nc_ch_client *client;
 
     if (!client_name) {
         ERRARG("client_name");
         return -1;
+    } else if (!max_wait) {
+        ERRARG("max_wait");
+        return -1;
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
 
-    if (client->conn_type != NC_CH_PERIOD) {
-        ERR("Call Home client \"%s\" is not of periodic connection type.");
+    if (client->conn_type != NC_CH_PERSIST) {
+        ERR("Call Home client \"%s\" is not of persistent connection type.");
         /* UNLOCK */
         nc_server_ch_client_unlock(client);
         return -1;
     }
 
-    client->conn.period.anchor_time = anchor_time;
+    client->conn.persist.ka_max_wait = max_wait;
 
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
@@ -2854,7 +2421,7 @@ nc_server_ch_client_periodic_set_anchor_time(const char *client_name, time_t anc
 }
 
 API int
-nc_server_ch_client_periodic_set_idle_timeout(const char *client_name, uint16_t idle_timeout)
+nc_server_ch_client_persist_set_keep_alive_max_attempts(const char *client_name, uint8_t max_attempts)
 {
     struct nc_ch_client *client;
 
@@ -2864,19 +2431,84 @@ nc_server_ch_client_periodic_set_idle_timeout(const char *client_name, uint16_t 
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
+    if (!client) {
+        return -1;
+    }
+
+    if (client->conn_type != NC_CH_PERSIST) {
+        ERR("Call Home client \"%s\" is not of persistent connection type.");
+        /* UNLOCK */
+        nc_server_ch_client_unlock(client);
+        return -1;
+    }
+
+    client->conn.persist.ka_max_attempts = max_attempts;
+
+    /* UNLOCK */
+    nc_server_ch_client_unlock(client);
+
+    return 0;
+}
+
+API int
+nc_server_ch_client_period_set_idle_timeout(const char *client_name, uint16_t idle_timeout)
+{
+    struct nc_ch_client *client;
+
+    if (!client_name) {
+        ERRARG("client_name");
+        return -1;
+    }
+
+    /* LOCK */
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
 
     if (client->conn_type != NC_CH_PERIOD) {
-        ERR("Call Home client \"%s\" is not of periodic connection type.", client_name);
+        ERR("Call Home client \"%s\" is not of periodic connection type.");
         /* UNLOCK */
         nc_server_ch_client_unlock(client);
         return -1;
     }
 
     client->conn.period.idle_timeout = idle_timeout;
+
+    /* UNLOCK */
+    nc_server_ch_client_unlock(client);
+
+    return 0;
+}
+
+API int
+nc_server_ch_client_period_set_reconnect_timeout(const char *client_name, uint16_t reconnect_timeout)
+{
+    struct nc_ch_client *client;
+
+    if (!client_name) {
+        ERRARG("client_name");
+        return -1;
+    } else if (!reconnect_timeout) {
+        ERRARG("reconnect_timeout");
+        return -1;
+    }
+
+    /* LOCK */
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
+    if (!client) {
+        return -1;
+    }
+
+    if (client->conn_type != NC_CH_PERIOD) {
+        ERR("Call Home client \"%s\" is not of periodic connection type.");
+        /* UNLOCK */
+        nc_server_ch_client_unlock(client);
+        return -1;
+    }
+
+    client->conn.period.reconnect_timeout = reconnect_timeout;
 
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
@@ -2895,7 +2527,7 @@ nc_server_ch_client_set_start_with(const char *client_name, NC_CH_START_WITH sta
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
@@ -2922,7 +2554,7 @@ nc_server_ch_client_set_max_attempts(const char *client_name, uint8_t max_attemp
     }
 
     /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
+    client = nc_server_ch_client_lock(client_name, 0, NULL);
     if (!client) {
         return -1;
     }
@@ -2937,37 +2569,38 @@ nc_server_ch_client_set_max_attempts(const char *client_name, uint8_t max_attemp
 
 /* client lock is expected to be held */
 static NC_MSG_TYPE
-nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
+nc_connect_ch_client_endpt(struct nc_ch_client *client, struct nc_ch_endpt *endpt, struct nc_session **session)
 {
     NC_MSG_TYPE msgtype;
     int sock, ret;
-    struct timespec ts_cur;
-    char *ip_host;
 
-    sock = nc_sock_connect(endpt->address, endpt->port, 5, &endpt->ka, &endpt->sock_pending, &ip_host);
+    sock = nc_sock_connect(endpt->address, endpt->port);
     if (sock < 0) {
         return NC_MSG_ERROR;
     }
-    /* no need to store the socket as pending any longer */
-    endpt->sock_pending = -1;
 
-    *session = nc_new_session(NC_SERVER, 0);
+    *session = nc_new_session(0);
     if (!(*session)) {
         ERRMEM;
         close(sock);
-        free(ip_host);
         return NC_MSG_ERROR;
     }
     (*session)->status = NC_STATUS_STARTING;
+    (*session)->side = NC_SERVER;
     (*session)->ctx = server_opts.ctx;
     (*session)->flags = NC_SESSION_SHAREDCTX;
-    (*session)->host = lydict_insert_zc(server_opts.ctx, ip_host);
+    (*session)->host = lydict_insert(server_opts.ctx, endpt->address, 0);
     (*session)->port = endpt->port;
+
+    /* transport lock */
+    pthread_mutex_init((*session)->ti_lock, NULL);
+    pthread_cond_init((*session)->ti_cond, NULL);
+    *(*session)->ti_inuse = 0;
 
     /* sock gets assigned to session or closed */
 #ifdef NC_ENABLED_SSH
-    if (endpt->ti == NC_TI_LIBSSH) {
-        (*session)->data = endpt->opts.ssh;
+    if (client->ti == NC_TI_LIBSSH) {
+        (*session)->data = client->opts.ssh;
         ret = nc_accept_ssh_session(*session, sock, NC_TRANSPORT_TIMEOUT);
         (*session)->data = NULL;
 
@@ -2981,8 +2614,8 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
     } else
 #endif
 #ifdef NC_ENABLED_TLS
-    if (endpt->ti == NC_TI_OPENSSL) {
-        (*session)->data = endpt->opts.tls;
+    if (client->ti == NC_TI_OPENSSL) {
+        (*session)->data = client->opts.tls;
         ret = nc_accept_tls_session(*session, sock, NC_TRANSPORT_TIMEOUT);
         (*session)->data = NULL;
 
@@ -3003,18 +2636,18 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
     }
 
     /* assign new SID atomically */
-    (*session)->id = ATOMIC_INC(&server_opts.new_session_id);
+    /* LOCK */
+    pthread_spin_lock(&server_opts.sid_lock);
+    (*session)->id = server_opts.new_session_id++;
+    /* UNLOCK */
+    pthread_spin_unlock(&server_opts.sid_lock);
 
     /* NETCONF handshake */
-    msgtype = nc_handshake_io(*session);
+    msgtype = nc_handshake(*session);
     if (msgtype != NC_MSG_HELLO) {
         goto fail;
     }
-
-    nc_gettimespec_mono(&ts_cur);
-    (*session)->opts.server.last_rpc = ts_cur.tv_sec;
-    nc_gettimespec_real(&ts_cur);
-    (*session)->opts.server.session_start = ts_cur.tv_sec;
+    (*session)->opts.server.session_start = (*session)->opts.server.last_rpc = time(NULL);
     (*session)->status = NC_STATUS_RUNNING;
 
     return msgtype;
@@ -3037,7 +2670,7 @@ nc_server_ch_client_with_endpt_lock(const char *name)
 
     while (1) {
         /* LOCK */
-        nc_server_ch_client_lock(name, NULL, 0, &client);
+        client = nc_server_ch_client_lock(name, 0, NULL);
         if (!client) {
             return NULL;
         }
@@ -3058,14 +2691,14 @@ nc_server_ch_client_with_endpt_lock(const char *name)
 static int
 nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct nc_ch_client_thread_arg *data)
 {
-    int ret = 0, r;
+    int ret;
     uint32_t idle_timeout;
     struct timespec ts;
     struct nc_ch_client *client;
 
     /* session created, initialize condition */
-    session->opts.server.ch_lock = calloc(1, sizeof *session->opts.server.ch_lock);
-    session->opts.server.ch_cond = calloc(1, sizeof *session->opts.server.ch_cond);
+    session->opts.server.ch_lock = malloc(sizeof *session->opts.server.ch_lock);
+    session->opts.server.ch_cond = malloc(sizeof *session->opts.server.ch_cond);
     if (!session->opts.server.ch_lock || !session->opts.server.ch_cond) {
         ERRMEM;
         nc_session_free(session, NULL);
@@ -3083,39 +2716,32 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
     data->session_clb(data->client_name, session);
 
     do {
-        nc_gettimespec_real(&ts);
+        nc_gettimespec(&ts);
         nc_addtimespec(&ts, NC_CH_NO_ENDPT_WAIT);
 
-        r = pthread_cond_timedwait(session->opts.server.ch_cond, session->opts.server.ch_lock, &ts);
-        if (!r) {
-            /* we were woken up, something probably happened */
-            if (session->status != NC_STATUS_RUNNING) {
-                break;
-            }
-        } else if (r != ETIMEDOUT) {
-            ERR("Pthread condition timedwait failed (%s).", strerror(r));
-            ret = -1;
-            break;
+        ret = pthread_cond_timedwait(session->opts.server.ch_cond, session->opts.server.ch_lock, &ts);
+        if (ret && (ret != ETIMEDOUT)) {
+            ERR("Pthread condition timedwait failed (%s).", strerror(ret));
+            goto ch_client_remove;
         }
 
         /* check whether the client was not removed */
         /* LOCK */
-        nc_server_ch_client_lock(data->client_name, NULL, 0, &client);
+        client = nc_server_ch_client_lock(data->client_name, 0, NULL);
         if (!client) {
             /* client was removed, finish thread */
             VRB("Call Home client \"%s\" removed, but an established session will not be terminated.",
-                    data->client_name);
-            ret = 1;
-            break;
+                data->client_name);
+            goto ch_client_remove;
         }
 
-        if (client->conn_type == NC_CH_PERIOD) {
-            idle_timeout = client->conn.period.idle_timeout;
+        if (client->conn_type == NC_CH_PERSIST) {
+            /* TODO keep-alives */
+            idle_timeout = client->conn.persist.idle_timeout;
         } else {
-            idle_timeout = 0;
+            idle_timeout = client->conn.period.idle_timeout;
         }
 
-        nc_gettimespec_mono(&ts);
         if (!session->opts.server.ntf_status && idle_timeout && (ts.tv_sec >= session->opts.server.last_rpc + idle_timeout)) {
             VRB("Call Home client \"%s\" session %u: session idle timeout elapsed.", client->name, session->id);
             session->status = NC_STATUS_INVALID;
@@ -3130,12 +2756,24 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
     /* CH UNLOCK */
     pthread_mutex_unlock(session->opts.server.ch_lock);
 
-    if (session->status == NC_STATUS_CLOSING) {
-        /* signal to nc_session_free() that we registered session being freed, otherwise it matters not */
-        session->flags &= ~NC_SESSION_CALLHOME;
-    }
+    return 0;
 
-    return ret;
+ch_client_remove:
+    /* make the session a standard one */
+    pthread_cond_destroy(session->opts.server.ch_cond);
+    free(session->opts.server.ch_cond);
+    session->opts.server.ch_cond = NULL;
+
+    session->flags &= ~NC_SESSION_CALLHOME;
+
+    /* CH UNLOCK */
+    pthread_mutex_unlock(session->opts.server.ch_lock);
+
+    pthread_mutex_destroy(session->opts.server.ch_lock);
+    free(session->opts.server.ch_lock);
+    session->opts.server.ch_lock = NULL;
+
+    return 1;
 }
 
 static void *
@@ -3144,27 +2782,24 @@ nc_ch_client_thread(void *arg)
     struct nc_ch_client_thread_arg *data = (struct nc_ch_client_thread_arg *)arg;
     NC_MSG_TYPE msgtype;
     uint8_t cur_attempts = 0;
-    uint16_t next_endpt_index;
+    uint16_t i;
     char *cur_endpt_name = NULL;
     struct nc_ch_endpt *cur_endpt;
     struct nc_session *session;
     struct nc_ch_client *client;
-    uint32_t client_id;
-    time_t reconnect_in;
 
     /* LOCK */
     client = nc_server_ch_client_with_endpt_lock(data->client_name);
     if (!client) {
         goto cleanup;
     }
-    client_id = client->id;
 
     cur_endpt = &client->ch_endpts[0];
     cur_endpt_name = strdup(cur_endpt->name);
 
     VRB("Call Home client \"%s\" connecting...", data->client_name);
     while (1) {
-        msgtype = nc_connect_ch_endpt(cur_endpt, &session);
+        msgtype = nc_connect_ch_client_endpt(client, cur_endpt, &session);
 
         if (msgtype == NC_MSG_HELLO) {
             /* UNLOCK */
@@ -3181,51 +2816,29 @@ nc_ch_client_thread(void *arg)
             if (!client) {
                 goto cleanup;
             }
-            if (client->id != client_id) {
-                nc_server_ch_client_unlock(client);
-                goto cleanup;
-            }
 
             /* session changed status -> it was disconnected for whatever reason,
-             * persistent connection immediately tries to reconnect, periodic connects at specific times */
+             * persistent connection immediately tries to reconnect, periodic waits some first */
             if (client->conn_type == NC_CH_PERIOD) {
                 /* UNLOCK */
                 nc_server_ch_client_unlock(client);
 
-                /* sleep until we should reconnect TODO wake up sometimes to check for new notifications */
-                reconnect_in = (time(NULL) - client->conn.period.anchor_time) % (client->conn.period.period * 60);
-                sleep(reconnect_in);
+                /* TODO wake up sometimes to check for new notifications */
+                usleep(client->conn.period.reconnect_timeout * 60 * 1000000);
 
                 /* LOCK */
                 client = nc_server_ch_client_with_endpt_lock(data->client_name);
                 if (!client) {
                     goto cleanup;
                 }
-                if (client->id != client_id) {
-                    nc_server_ch_client_unlock(client);
-                    goto cleanup;
-                }
             }
 
             /* set next endpoint to try */
             if (client->start_with == NC_CH_FIRST_LISTED) {
-                next_endpt_index = 0;
-            } else if (client->start_with == NC_CH_LAST_CONNECTED) {
-                /* we keep the current one but due to unlock/lock we have to find it again */
-                for (next_endpt_index = 0; next_endpt_index < client->ch_endpt_count; ++next_endpt_index) {
-                    if (!strcmp(client->ch_endpts[next_endpt_index].name, cur_endpt_name)) {
-                        break;
-                    }
-                }
-                if (next_endpt_index >= client->ch_endpt_count) {
-                    /* endpoint was removed, start with the first one */
-                    next_endpt_index = 0;
-                }
-            } else {
-                /* just get a random index */
-                next_endpt_index = rand() % client->ch_endpt_count;
-            }
-
+                cur_endpt = &client->ch_endpts[0];
+                free(cur_endpt_name);
+                cur_endpt_name = strdup(cur_endpt->name);
+            } /* else we keep the current one */
         } else {
             /* UNLOCK */
             nc_server_ch_client_unlock(client);
@@ -3238,41 +2851,29 @@ nc_ch_client_thread(void *arg)
             if (!client) {
                 goto cleanup;
             }
-            if (client->id != client_id) {
-                nc_server_ch_client_unlock(client);
-                goto cleanup;
-            }
 
             ++cur_attempts;
-
-            /* try to find our endpoint again */
-            for (next_endpt_index = 0; next_endpt_index < client->ch_endpt_count; ++next_endpt_index) {
-                if (!strcmp(client->ch_endpts[next_endpt_index].name, cur_endpt_name)) {
-                    break;
+            if (cur_attempts == client->max_attempts) {
+                for (i = 0; i < client->ch_endpt_count; ++i) {
+                    if (!strcmp(client->ch_endpts[i].name, cur_endpt_name)) {
+                        break;
+                    }
                 }
-            }
-
-            if (next_endpt_index >= client->ch_endpt_count) {
-                /* endpoint was removed, start with the first one */
-                next_endpt_index = 0;
-                cur_attempts = 0;
-            } else if (cur_attempts == client->max_attempts) {
-                /* we have tried to connect to this endpoint enough times */
-                if (next_endpt_index < client->ch_endpt_count - 1) {
+                if (i < client->ch_endpt_count - 1) {
                     /* just go to the next endpoint */
-                    ++next_endpt_index;
+                    cur_endpt = &client->ch_endpts[i + 1];
+                    free(cur_endpt_name);
+                    cur_endpt_name = strdup(cur_endpt->name);
                 } else {
-                    /* cur_endpoint is the last, start with the first one */
-                    next_endpt_index = 0;
+                    /* cur_endpoint was removed or is the last, either way start with the first one */
+                    cur_endpt = &client->ch_endpts[0];
+                    free(cur_endpt_name);
+                    cur_endpt_name = strdup(cur_endpt->name);
                 }
 
                 cur_attempts = 0;
             } /* else we keep the current one */
         }
-
-        cur_endpt = &client->ch_endpts[next_endpt_index];
-        free(cur_endpt_name);
-        cur_endpt_name = strdup(cur_endpt->name);
     }
 
 cleanup:
@@ -3284,9 +2885,8 @@ cleanup:
 }
 
 API int
-nc_connect_ch_client_dispatch(const char *client_name, void (*session_clb)(const char *client_name,
-        struct nc_session *new_session))
-{
+nc_connect_ch_client_dispatch(const char *client_name,
+                              void (*session_clb)(const char *client_name, struct nc_session *new_session)) {
     int ret;
     pthread_t tid;
     struct nc_ch_client_thread_arg *arg;
@@ -3328,6 +2928,12 @@ nc_connect_ch_client_dispatch(const char *client_name, void (*session_clb)(const
 
 #endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
 
+API int
+nc_server_endpt_count(void)
+{
+    return server_opts.endpt_count;
+}
+
 API time_t
 nc_session_get_start_time(const struct nc_session *session)
 {
@@ -3359,19 +2965,4 @@ nc_session_get_notif_status(const struct nc_session *session)
     }
 
     return session->opts.server.ntf_status;
-}
-
-API int
-nc_session_is_callhome(const struct nc_session *session)
-{
-    if (!session || (session->side != NC_SERVER)) {
-        ERRARG("session");
-        return 0;
-    }
-
-    if (session->flags & NC_SESSION_CALLHOME) {
-        return 1;
-    }
-
-    return 0;
 }

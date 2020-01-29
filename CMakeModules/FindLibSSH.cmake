@@ -3,7 +3,8 @@
 #
 #  LIBSSH_FOUND - system has LibSSH
 #  LIBSSH_INCLUDE_DIRS - the LibSSH include directory
-#  LIBSSH_LIBRARY_DIR - the LibSSH library directory
+#  LIBSSH_LIBRARIES - Link these to use LibSSH
+#  LIBSSH_DEFINITIONS - Compiler switches required for using LibSSH
 #
 #  Copyright (c) 2009 Andreas Schneider <asn@cryptomilk.org>
 #
@@ -16,7 +17,7 @@
 #  2. Redistributions in binary form must reproduce the copyright
 #     notice, this list of conditions and the following disclaimer in the
 #     documentation and/or other materials provided with the distribution.
-#  3. The name of the author may not be used to endorse or promote products
+#  3. The name of the author may not be used to endorse or promote products 
 #     derived from this software without specific prior written permission.
 #
 #  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
@@ -31,10 +32,10 @@
 #  THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-if (LIBSSH_LIBRARY_DIR AND LIBSSH_INCLUDE_DIRS)
+if (LIBSSH_LIBRARIES AND LIBSSH_INCLUDE_DIRS)
   # in cache already
   set(LIBSSH_FOUND TRUE)
-else (LIBSSH_LIBRARY_DIR AND LIBSSH_INCLUDE_DIRS)
+else (LIBSSH_LIBRARIES AND LIBSSH_INCLUDE_DIRS)
 
   find_path(LIBSSH_INCLUDE_DIR
     NAMES
@@ -47,11 +48,11 @@ else (LIBSSH_LIBRARY_DIR AND LIBSSH_INCLUDE_DIRS)
       ${CMAKE_INCLUDE_PATH}
       ${CMAKE_INSTALL_PREFIX}/include
   )
-
+  
   find_library(SSH_LIBRARY
     NAMES
-      ssh.so
-      libssh.so
+      ssh
+      libssh
     PATHS
       /usr/lib
       /usr/local/lib
@@ -70,13 +71,9 @@ else (LIBSSH_LIBRARY_DIR AND LIBSSH_INCLUDE_DIRS)
   )
 
   if (SSH_FOUND)
-    string(REPLACE "libssh.so" ""
-      LIBSSH_LIBRARY_DIR
+    set(LIBSSH_LIBRARIES
+      ${LIBSSH_LIBRARIES}
       ${SSH_LIBRARY}
-    )
-    string(REPLACE "ssh.so" ""
-      LIBSSH_LIBRARY_DIR
-      ${LIBSSH_LIBRARY_DIR}
     )
 
     if (LibSSH_FIND_VERSION)
@@ -108,11 +105,11 @@ else (LIBSSH_LIBRARY_DIR AND LIBSSH_INCLUDE_DIRS)
   # so we need this if() here.
   if (LIBSSH_FOUND)
     include(FindPackageHandleStandardArgs)
-    find_package_handle_standard_args(LibSSH DEFAULT_MSG LIBSSH_LIBRARY_DIR LIBSSH_INCLUDE_DIRS)
+    find_package_handle_standard_args(LibSSH DEFAULT_MSG LIBSSH_LIBRARIES LIBSSH_INCLUDE_DIRS)
   endif (LIBSSH_FOUND)
 
-  # show the LIBSSH_INCLUDE_DIRS and LIBSSH_LIBRARY_DIR variables only in the advanced view
-  mark_as_advanced(LIBSSH_INCLUDE_DIRS LIBSSH_LIBRARY_DIR)
+  # show the LIBSSH_INCLUDE_DIRS and LIBSSH_LIBRARIES variables only in the advanced view
+  mark_as_advanced(LIBSSH_INCLUDE_DIRS LIBSSH_LIBRARIES)
 
-endif (LIBSSH_LIBRARY_DIR AND LIBSSH_INCLUDE_DIRS)
+endif (LIBSSH_LIBRARIES AND LIBSSH_INCLUDE_DIRS)
 

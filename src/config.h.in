@@ -16,11 +16,9 @@
 #define NC_CONFIG_H_
 
 /*
- * Mark all objects as hidden and export only objects explicitly marked to be part of the public API or
- * those marked as mock objects for testing purpose
+ * Mark all objects as hidden and export only objects explicitly marked to be part of the public API.
  */
 #define API __attribute__((visibility("default")))
-#define MOCK __attribute__((visibility("default")))
 
 #ifdef __GNUC__
 #  define UNUSED(x) UNUSED_ ## x __attribute__((__unused__))
@@ -29,17 +27,16 @@
 #endif
 
 /*
- * Support for atomic variables
+ * Support for spinlocks
  */
-#cmakedefine HAVE_STDATOMIC
-#ifdef HAVE_STDATOMIC
-# include <stdatomic.h>
-
-# define ATOMIC_UINT32_T atomic_uint_fast32_t
-# define ATOMIC_INC(x) atomic_fetch_add(x, 1)
-#else
-# define ATOMIC_UINT32_T uint32_t
-# define ATOMIC_INC(x) __sync_add_and_fetch(x, 1)
+#cmakedefine HAVE_SPINLOCK
+#ifndef HAVE_SPINLOCK
+#  define pthread_spinlock_t pthread_mutex_t
+#  define pthread_spin_init(s, opt) pthread_mutex_init(s, NULL)
+#  define pthread_spin_lock pthread_mutex_lock
+#  define pthread_spin_trylock pthread_mutex_trylock
+#  define pthread_spin_unlock pthread_mutex_unlock
+#  define pthread_spin_destroy pthread_mutex_destroy
 #endif
 
 /*
@@ -48,14 +45,9 @@
 #cmakedefine HAVE_PTHREAD_MUTEX_TIMEDLOCK
 
 /*
- * libssh support for this session option
- */
-#cmakedefine HAVE_LIBSSH_OPTIONS_PUBLICKEY_ACCEPTED_TYPES
-
-/*
  * Location of installed basic YIN/YANG schemas
  */
-#define NC_SCHEMAS_DIR "@SCHEMAS_DIR@"
+#define SCHEMAS_DIR "@CMAKE_INSTALL_PREFIX@/@DATA_INSTALL_DIR@"
 
 /*
  * Inactive read timeout
@@ -72,13 +64,5 @@
  * pspoll structure queue size (also found in nc_server.h)
  */
 #define NC_PS_QUEUE_SIZE @MAX_PSPOLL_THREAD_COUNT@
-
-/* Microseconds after which tasks are repeated until the full timeout elapses.
- * A millisecond (1000) should be divisible by this number without remain.
- */
-#define NC_TIMEOUT_STEP @TIMEOUT_STEP@
-
-/* Portability feature-check macros. */
-#cmakedefine HAVE_PTHREAD_RWLOCKATTR_SETKIND_NP
 
 #endif /* NC_CONFIG_H_ */

@@ -15,23 +15,10 @@
 #ifndef NC_MESSAGES_SERVER_H_
 #define NC_MESSAGES_SERVER_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
-#include <libyang/libyang.h>
 
 #include "netconf.h"
 #include "session.h"
-
-/**
- * @defgroup server_msg Server Messages
- * @ingroup server
- *
- * @brief Functions to create NETCONF Event notifications and replies to the NETCONF RPCs (or actions).
- * @{
- */
 
 /**
  * @brief Enumeration of NETCONF errors
@@ -174,10 +161,9 @@ struct nc_server_error *nc_err(int tag, ...);
  * The function should be used immediately when a libyang function fails to generate
  * NETCONF error structure based on internal libyang error information (ly_errno, ly_errmsg, ...)
  *
- * @param[in] ctx Libyang context to read the error from.
  * @return Server error structure, NULL on error.
  */
-struct nc_server_error *nc_err_libyang(struct ly_ctx *ctx);
+struct nc_server_error *nc_err_libyang(void);
 
 /**
  * @brief Get the \<error-type\> of a server error.
@@ -317,7 +303,7 @@ void nc_err_free(struct nc_server_error *err);
  * @return Newly created structure of the Event Notification object to be sent to the clients via nc_server_send_notif()
  * and freed using nc_server_notif_free().
  */
-struct nc_server_notif *nc_server_notif_new(struct lyd_node *event, char *eventtime, NC_PARAMTYPE paramtype);
+struct nc_server_notif *nc_server_notif_new(struct lyd_node* event, char *eventtime, NC_PARAMTYPE paramtype);
 
 /**
  * @brief Send NETCONF Event Notification via the session.
@@ -347,11 +333,5 @@ void nc_server_notif_free(struct nc_server_notif *notif);
  * @return Datetime timestamp of the notification, NULL on error.
  */
 const char *nc_server_notif_get_time(const struct nc_server_notif *notif);
-
-/**@} Client Messages */
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* NC_MESSAGES_SERVER_H_ */

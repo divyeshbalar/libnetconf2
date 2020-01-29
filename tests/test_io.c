@@ -30,7 +30,7 @@
 #include <messages_p.h>
 #include <session_p.h>
 #include <session_client.h>
-#include "tests/config.h"
+#include "config.h"
 
 struct wr {
     struct nc_session *session;
@@ -41,12 +41,12 @@ static int
 setup_write(void **state)
 {
     (void) state; /* unused */
-    int fd, pipes[2];
+    int fd;
     struct wr *w;
 
     w = malloc(sizeof *w);
     w->session = calloc(1, sizeof *w->session);
-    w->session->ctx = ly_ctx_new(TESTS_DIR"../schemas", 0);
+    w->session->ctx = ly_ctx_new(TESTS_DIR"../schemas");
 
     /* ietf-netconf */
     fd = open(TESTS_DIR"../schemas/ietf-netconf.yin", O_RDONLY);
@@ -58,16 +58,18 @@ setup_write(void **state)
     lys_parse_fd(w->session->ctx, fd, LYS_IN_YIN);
     close(fd);
 
-    pipe(pipes);
-
     w->session->status = NC_STATUS_RUNNING;
     w->session->version = NC_VERSION_10;
     w->session->opts.client.msgid = 999;
     w->session->ti_type = NC_TI_FD;
-    w->session->io_lock = malloc(sizeof *w->session->io_lock);
-    pthread_mutex_init(w->session->io_lock, NULL);
-    w->session->ti.fd.in = pipes[0];
-    w->session->ti.fd.out = pipes[1];
+    w->session->ti_lock = malloc(sizeof *w->session->ti_lock);
+    pthread_mutex_init(w->session->ti_lock, NULL);
+    w->session->ti_cond = malloc(sizeof *w->session->ti_cond);
+    pthread_cond_init(w->session->ti_cond, NULL);
+    w->session->ti_inuse = malloc(sizeof *w->session->ti_inuse);
+    *w->session->ti_inuse = 0;
+    w->session->ti.fd.in = STDIN_FILENO;
+    w->session->ti.fd.out = STDOUT_FILENO;
 
     /* get rpc to write */
     w->rpc = nc_rpc_lock(NC_DATASTORE_RUNNING);
@@ -84,9 +86,7 @@ teardown_write(void **state)
     struct wr *w = (struct wr *)*state;
 
     nc_rpc_free(w->rpc);
-    close(w->session->ti.fd.in);
     w->session->ti.fd.in = -1;
-    close(w->session->ti.fd.out);
     w->session->ti.fd.out = -1;
     nc_session_free(w->session, NULL);
     free(w);
@@ -141,12 +141,6 @@ test_write_rpc_bad(void **state)
     NC_MSG_TYPE type;
 
     w->session->side = NC_SERVER;
-    w->session->opts.server.rpc_lock = malloc(sizeof *w->session->opts.server.rpc_lock);
-    pthread_mutex_init(w->session->opts.server.rpc_lock, NULL);
-    w->session->opts.server.rpc_cond = malloc(sizeof *w->session->opts.server.rpc_cond);
-    pthread_cond_init(w->session->opts.server.rpc_cond, NULL);
-    w->session->opts.server.rpc_inuse = malloc(sizeof *w->session->opts.server.rpc_inuse);
-    *w->session->opts.server.rpc_inuse = 0;
 
     do {
         type = nc_send_rpc(w->session, w->rpc, 1000, &msgid);

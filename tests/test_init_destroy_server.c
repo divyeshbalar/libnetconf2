@@ -29,7 +29,7 @@
 #include <cmocka.h>
 #include <libyang/libyang.h>
 
-#include "tests/config.h"
+#include "config.h"
 #include <session_server.h>
 
 struct ly_ctx *ctx;
@@ -39,7 +39,7 @@ setup_server(void **state)
 {
     (void)state;
 
-    ctx = ly_ctx_new(NULL, 0);
+    ctx = ly_ctx_new(NULL);
     assert_non_null(ctx);
 
     nc_server_init(ctx);

@@ -29,16 +29,9 @@
 #include "session_client_ch.h"
 #include "libnetconf.h"
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-#define X509_STORE_CTX_get_by_subject X509_STORE_get_by_subject
-#endif
-
-struct nc_client_context *nc_client_context_location(void);
-int nc_session_new_ctx( struct nc_session *session, struct ly_ctx *ctx);
-
-#define client_opts nc_client_context_location()->opts
-#define tls_opts nc_client_context_location()->tls_opts
-#define tls_ch_opts nc_client_context_location()->tls_ch_opts
+extern struct nc_client_opts client_opts;
+static struct nc_client_tls_opts tls_opts;
+static struct nc_client_tls_opts tls_ch_opts;
 
 static int tlsauth_ch;
 
@@ -78,7 +71,7 @@ tlsauth_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
     store_ctx = X509_STORE_CTX_new();
     obj = X509_OBJECT_new();
     X509_STORE_CTX_init(store_ctx, opts->crl_store, NULL, NULL);
-    rc = X509_STORE_CTX_get_by_subject(store_ctx, X509_LU_CRL, subject, obj);
+    rc = X509_STORE_get_by_subject(store_ctx, X509_LU_CRL, subject, obj);
     X509_STORE_CTX_free(store_ctx);
     crl = X509_OBJECT_get0_X509_CRL(obj);
     if (rc > 0 && crl) {
@@ -117,7 +110,7 @@ tlsauth_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
     store_ctx = X509_STORE_CTX_new();
     obj = X509_OBJECT_new();
     X509_STORE_CTX_init(store_ctx, opts->crl_store, NULL, NULL);
-    rc = X509_STORE_CTX_get_by_subject(store_ctx, X509_LU_CRL, issuer, obj);
+    rc = X509_STORE_get_by_subject(store_ctx, X509_LU_CRL, issuer, obj);
     X509_STORE_CTX_free(store_ctx);
     crl = X509_OBJECT_get0_X509_CRL(obj);
     if (rc > 0 && crl) {
@@ -173,7 +166,7 @@ tlsauth_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
      * the current certificate in order to verify it's integrity */
     memset((char *)&obj, 0, sizeof obj);
     X509_STORE_CTX_init(&store_ctx, opts->crl_store, NULL, NULL);
-    rc = X509_STORE_CTX_get_by_subject(&store_ctx, X509_LU_CRL, subject, &obj);
+    rc = X509_STORE_get_by_subject(&store_ctx, X509_LU_CRL, subject, &obj);
     X509_STORE_CTX_cleanup(&store_ctx);
     crl = obj.data.crl;
     if (rc > 0 && crl) {
@@ -211,7 +204,7 @@ tlsauth_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
      * the current certificate in order to check for revocation */
     memset((char *)&obj, 0, sizeof obj);
     X509_STORE_CTX_init(&store_ctx, opts->crl_store, NULL, NULL);
-    rc = X509_STORE_CTX_get_by_subject(&store_ctx, X509_LU_CRL, issuer, &obj);
+    rc = X509_STORE_get_by_subject(&store_ctx, X509_LU_CRL, issuer, &obj);
     X509_STORE_CTX_cleanup(&store_ctx);
     crl = obj.data.crl;
     if (rc > 0 && crl) {
@@ -234,7 +227,7 @@ tlsauth_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 
 #endif
 
-void
+static void
 _nc_client_tls_destroy_opts(struct nc_client_tls_opts *opts)
 {
     free(opts->cert_path);
@@ -246,8 +239,6 @@ _nc_client_tls_destroy_opts(struct nc_client_tls_opts *opts)
     free(opts->crl_file);
     free(opts->crl_dir);
     X509_STORE_free(opts->crl_store);
-
-    memset(opts, 0, sizeof *opts);
 }
 
 void
@@ -585,7 +576,6 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
     struct nc_session *session = NULL;
     int sock, verify, ret;
     struct timespec ts_timeout, ts_cur;
-    char *ip_host = NULL;
 
     if (!tls_opts.cert_path || (!tls_opts.ca_file && !tls_opts.ca_dir)) {
         ERRINIT;
@@ -607,12 +597,18 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
     }
 
     /* prepare session structure */
-    session = nc_new_session(NC_CLIENT, 0);
+    session = nc_new_session(0);
     if (!session) {
         ERRMEM;
         return NULL;
     }
     session->status = NC_STATUS_STARTING;
+    session->side = NC_CLIENT;
+
+    /* transport lock */
+    pthread_mutex_init(session->ti_lock, NULL);
+    pthread_cond_init(session->ti_cond, NULL);
+    *session->ti_inuse = 0;
 
     /* fill the session */
     session->ti_type = NC_TI_OPENSSL;
@@ -622,7 +618,7 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
     }
 
     /* create and assign socket */
-    sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
+    sock = nc_sock_connect(host, port);
     if (sock == -1) {
         ERR("Unable to connect to %s:%u (%s).", host, port, strerror(errno));
         goto fail;
@@ -633,12 +629,12 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
     SSL_set_mode(session->ti.tls, SSL_MODE_AUTO_RETRY);
 
     /* connect and perform the handshake */
-    nc_gettimespec_mono(&ts_timeout);
+    nc_gettimespec(&ts_timeout);
     nc_addtimespec(&ts_timeout, NC_TRANSPORT_TIMEOUT);
     tlsauth_ch = 0;
     while (((ret = SSL_connect(session->ti.tls)) == -1) && (SSL_get_error(session->ti.tls, ret) == SSL_ERROR_WANT_READ)) {
         usleep(NC_TIMEOUT_STEP);
-        nc_gettimespec_mono(&ts_cur);
+        nc_gettimespec(&ts_cur);
         if (nc_difftimespec(&ts_cur, &ts_timeout) < 1) {
             ERR("SSL_connect timeout.");
             goto fail;
@@ -669,13 +665,25 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
         WRN("Server certificate verification problem (%s).", X509_verify_cert_error_string(verify));
     }
 
-    if (nc_session_new_ctx(session, ctx) != EXIT_SUCCESS) {
-        goto fail;
+    /* assign context (dicionary needed for handshake) */
+    if (!ctx) {
+        if (client_opts.schema_searchpath) {
+            ctx = ly_ctx_new(client_opts.schema_searchpath);
+        } else {
+            ctx = ly_ctx_new(SCHEMAS_DIR);
+        }
+        /* definitely should not happen, but be ready */
+        if (!ctx && !(ctx = ly_ctx_new(NULL))) {
+            /* that's just it */
+            goto fail;
+        }
+    } else {
+        session->flags |= NC_SESSION_SHAREDCTX;
     }
-    ctx = session->ctx;
+    session->ctx = ctx;
 
     /* NETCONF handshake */
-    if (nc_handshake_io(session) != NC_MSG_HELLO) {
+    if (nc_handshake(session) != NC_MSG_HELLO) {
         goto fail;
     }
     session->status = NC_STATUS_RUNNING;
@@ -685,14 +693,13 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
     }
 
     /* store information into session and the dictionary */
-    session->host = lydict_insert_zc(ctx, ip_host);
+    session->host = lydict_insert(ctx, host, 0);
     session->port = port;
     session->username = lydict_insert(ctx, "certificate-based", 0);
 
     return session;
 
 fail:
-    free(ip_host);
     nc_session_free(session, NULL);
     return NULL;
 }
@@ -711,22 +718,41 @@ nc_connect_libssl(SSL *tls, struct ly_ctx *ctx)
     }
 
     /* prepare session structure */
-    session = nc_new_session(NC_CLIENT, 0);
+    session = nc_new_session(0);
     if (!session) {
         ERRMEM;
         return NULL;
     }
     session->status = NC_STATUS_STARTING;
+    session->side = NC_CLIENT;
+
+    /* transport lock */
+    pthread_mutex_init(session->ti_lock, NULL);
+    pthread_cond_init(session->ti_cond, NULL);
+    *session->ti_inuse = 0;
+
     session->ti_type = NC_TI_OPENSSL;
     session->ti.tls = tls;
 
-    if (nc_session_new_ctx(session, ctx) != EXIT_SUCCESS) {
-        goto fail;
+    /* assign context (dicionary needed for handshake) */
+    if (!ctx) {
+        if (client_opts.schema_searchpath) {
+            ctx = ly_ctx_new(client_opts.schema_searchpath);
+        } else {
+            ctx = ly_ctx_new(SCHEMAS_DIR);
+        }
+        /* definitely should not happen, but be ready */
+        if (!ctx && !(ctx = ly_ctx_new(NULL))) {
+            /* that's just it */
+            goto fail;
+        }
+    } else {
+        session->flags |= NC_SESSION_SHAREDCTX;
     }
-    ctx = session->ctx;
+    session->ctx = ctx;
 
     /* NETCONF handshake */
-    if (nc_handshake_io(session) != NC_MSG_HELLO) {
+    if (nc_handshake(session) != NC_MSG_HELLO) {
         goto fail;
     }
     session->status = NC_STATUS_RUNNING;
@@ -768,14 +794,14 @@ nc_accept_callhome_tls_sock(int sock, const char *host, uint16_t port, struct ly
 
     /* connect and perform the handshake */
     if (timeout > -1) {
-        nc_gettimespec_mono(&ts_timeout);
+        nc_gettimespec(&ts_timeout);
         nc_addtimespec(&ts_timeout, timeout);
     }
     tlsauth_ch = 1;
     while (((ret = SSL_connect(tls)) == -1) && (SSL_get_error(tls, ret) == SSL_ERROR_WANT_READ)) {
         usleep(NC_TIMEOUT_STEP);
         if (timeout > -1) {
-            nc_gettimespec_mono(&ts_cur);
+            nc_gettimespec(&ts_cur);
             if (nc_difftimespec(&ts_cur, &ts_timeout) < 1) {
                 ERR("SSL_connect timeout.");
                 SSL_free(tls);

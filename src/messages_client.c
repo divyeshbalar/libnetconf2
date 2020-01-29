@@ -12,7 +12,6 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
-#include <assert.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -514,116 +513,6 @@ nc_rpc_subscribe(const char *stream_name, const char *filter, const char *start_
     return (struct nc_rpc *)rpc;
 }
 
-API struct nc_rpc *
-nc_rpc_getdata(const char *datastore, const char *filter, const char *config_filter, char **origin_filter,
-               int origin_filter_count, int negated_origin_filter, uint16_t max_depth, int with_origin,
-               NC_WD_MODE wd_mode, NC_PARAMTYPE paramtype)
-{
-    struct nc_rpc_getdata *rpc = NULL;
-    int i;
-
-    if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
-        ERR("Filter is neither an XML subtree nor an XPath expression (invalid first char '%c').", filter[0]);
-        return NULL;
-    } else if (!datastore) {
-        ERRARG("datastore");
-        return NULL;
-    }
-
-    rpc = calloc(1, sizeof *rpc);
-    if (!rpc) {
-        ERRMEM;
-        return NULL;
-    }
-    rpc->free = (paramtype == NC_PARAMTYPE_CONST ? 0 : 1);
-
-    rpc->type = NC_RPC_GETDATA;
-    if (paramtype == NC_PARAMTYPE_DUP_AND_FREE) {
-        rpc->datastore = strdup(datastore);
-    } else {
-        rpc->datastore = (char *)datastore;
-    }
-    if (filter && (paramtype == NC_PARAMTYPE_DUP_AND_FREE)) {
-        rpc->filter = strdup(filter);
-    } else {
-        rpc->filter = (char *)filter;
-    }
-    if (config_filter && (paramtype == NC_PARAMTYPE_DUP_AND_FREE)) {
-        rpc->config_filter = strdup(config_filter);
-    } else {
-        rpc->config_filter = (char *)config_filter;
-    }
-    if (origin_filter && (paramtype == NC_PARAMTYPE_DUP_AND_FREE)) {
-        rpc->origin_filter = malloc(origin_filter_count * sizeof *rpc->origin_filter);
-        if (!rpc->origin_filter) {
-            ERRMEM;
-            goto error;
-        }
-        for (i = 0; i < origin_filter_count; ++i) {
-            rpc->origin_filter[i] = strdup(origin_filter[i]);
-            if (!rpc->origin_filter[i]) {
-                ERRMEM;
-                goto error;
-            }
-            ++rpc->origin_filter_count;
-        }
-    } else {
-        rpc->origin_filter = origin_filter;
-        rpc->origin_filter_count = origin_filter_count;
-    }
-    rpc->negated_origin_filter = negated_origin_filter;
-    rpc->max_depth = max_depth;
-    rpc->with_origin = with_origin;
-    rpc->wd_mode = wd_mode;
-
-    return (struct nc_rpc *)rpc;
-
-error:
-    nc_rpc_free((struct nc_rpc *)rpc);
-    return NULL;
-}
-
-API struct nc_rpc *
-nc_rpc_editdata(const char *datastore, NC_RPC_EDIT_DFLTOP default_op, const char *edit_content, NC_PARAMTYPE paramtype)
-{
-    struct nc_rpc_editdata *rpc;
-
-    if (!datastore) {
-        ERRARG("datastore");
-        return NULL;
-    } else if (!edit_content) {
-        ERRARG("edit_content");
-        return NULL;
-    }
-
-    if (edit_content[0] && (edit_content[0] != '<') && !isalpha(edit_content[0])) {
-        ERR("<edit-data> content is neither a URL nor an XML config (invalid first char '%c').", edit_content[0]);
-        return NULL;
-    }
-
-    rpc = malloc(sizeof *rpc);
-    if (!rpc) {
-        ERRMEM;
-        return NULL;
-    }
-
-    rpc->type = NC_RPC_EDITDATA;
-    if (paramtype == NC_PARAMTYPE_DUP_AND_FREE) {
-        rpc->datastore = strdup(datastore);
-    } else {
-        rpc->datastore = (char *)datastore;
-    }
-    rpc->default_op = default_op;
-    if (paramtype == NC_PARAMTYPE_DUP_AND_FREE) {
-        rpc->edit_cont = strdup(edit_content);
-    } else {
-        rpc->edit_cont = (char *)edit_content;
-    }
-    rpc->free = (paramtype == NC_PARAMTYPE_CONST ? 0 : 1);
-
-    return (struct nc_rpc *)rpc;
-}
-
 API void
 nc_rpc_free(struct nc_rpc *rpc)
 {
@@ -638,9 +527,6 @@ nc_rpc_free(struct nc_rpc *rpc)
     struct nc_rpc_validate *rpc_validate;
     struct nc_rpc_getschema *rpc_getschema;
     struct nc_rpc_subscribe *rpc_subscribe;
-    struct nc_rpc_getdata *rpc_getdata;
-    struct nc_rpc_editdata *rpc_editdata;
-    int i;
 
     if (!rpc) {
         return;
@@ -673,7 +559,6 @@ nc_rpc_free(struct nc_rpc *rpc)
         rpc_copy = (struct nc_rpc_copy *)rpc;
         if (rpc_copy->free) {
             free(rpc_copy->url_config_src);
-            free(rpc_copy->url_trg);
         }
         break;
     case NC_RPC_DELETE:
@@ -724,25 +609,6 @@ nc_rpc_free(struct nc_rpc *rpc)
             free(rpc_subscribe->stop);
         }
         break;
-    case NC_RPC_GETDATA:
-        rpc_getdata = (struct nc_rpc_getdata *)rpc;
-        if (rpc_getdata->free) {
-            free(rpc_getdata->datastore);
-            free(rpc_getdata->filter);
-            free(rpc_getdata->config_filter);
-            for (i = 0; i < rpc_getdata->origin_filter_count; ++i) {
-                free(rpc_getdata->origin_filter[i]);
-            }
-            free(rpc_getdata->origin_filter);
-        }
-        break;
-    case NC_RPC_EDITDATA:
-        rpc_editdata = (struct nc_rpc_editdata *)rpc;
-        if (rpc_editdata->free) {
-            free(rpc_editdata->datastore);
-            free(rpc_editdata->edit_cont);
-        }
-        break;
     default:
         /* nothing special needed */
         break;
@@ -752,48 +618,11 @@ nc_rpc_free(struct nc_rpc *rpc)
 }
 
 API void
-nc_client_err_clean(struct nc_err *err, struct ly_ctx *ctx)
-{
-    int i;
-
-    assert(ctx);
-
-    if (!err) {
-        return;
-    }
-
-    lydict_remove(ctx, err->type);
-    lydict_remove(ctx, err->tag);
-    lydict_remove(ctx, err->severity);
-    lydict_remove(ctx, err->apptag);
-    lydict_remove(ctx, err->path);
-    lydict_remove(ctx, err->message);
-    lydict_remove(ctx, err->message_lang);
-    lydict_remove(ctx, err->sid);
-    for (i = 0; i < err->attr_count; ++i) {
-        lydict_remove(ctx, err->attr[i]);
-    }
-    free(err->attr);
-    for (i = 0; i < err->elem_count; ++i) {
-        lydict_remove(ctx, err->elem[i]);
-    }
-    free(err->elem);
-    for (i = 0; i < err->ns_count; ++i) {
-        lydict_remove(ctx, err->ns[i]);
-    }
-    free(err->ns);
-    for (i = 0; i < err->other_count; ++i) {
-        lyxml_free(ctx, err->other[i]);
-    }
-    free(err->other);
-}
-
-API void
 nc_reply_free(struct nc_reply *reply)
 {
     struct nc_client_reply_error *error;
     struct nc_reply_data *data;
-    uint32_t i;
+    uint32_t i, j;
 
     if (!reply) {
         return;
@@ -812,7 +641,30 @@ nc_reply_free(struct nc_reply *reply)
     case NC_RPL_ERROR:
         error = (struct nc_client_reply_error *)reply;
         for (i = 0; i < error->count; ++i) {
-            nc_client_err_clean(&error->err[i], error->ctx);
+            lydict_remove(error->ctx, error->err[i].type);
+            lydict_remove(error->ctx, error->err[i].tag);
+            lydict_remove(error->ctx, error->err[i].severity);
+            lydict_remove(error->ctx, error->err[i].apptag);
+            lydict_remove(error->ctx, error->err[i].path);
+            lydict_remove(error->ctx, error->err[i].message);
+            lydict_remove(error->ctx, error->err[i].message_lang);
+            lydict_remove(error->ctx, error->err[i].sid);
+            for (j = 0; j < error->err[i].attr_count; ++j) {
+                lydict_remove(error->ctx, error->err[i].attr[j]);
+            }
+            free(error->err[i].attr);
+            for (j = 0; j < error->err[i].elem_count; ++j) {
+                lydict_remove(error->ctx, error->err[i].elem[j]);
+            }
+            free(error->err[i].elem);
+            for (j = 0; j < error->err[i].ns_count; ++j) {
+                lydict_remove(error->ctx, error->err[i].ns[j]);
+            }
+            free(error->err[i].ns);
+            for (j = 0; j < error->err[i].other_count; ++j) {
+                lyxml_free(error->ctx, error->err[i].other[j]);
+            }
+            free(error->err[i].other);
         }
         free(error->err);
         break;

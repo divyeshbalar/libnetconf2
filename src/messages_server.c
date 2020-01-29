@@ -16,7 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <stdbool.h>
 
 #include <libyang/libyang.h>
 
@@ -362,7 +361,7 @@ error:
 }
 
 API struct nc_server_error *
-nc_err_libyang(struct ly_ctx *ctx)
+nc_err_libyang(void)
 {
     struct nc_server_error *e;
     struct lyxml_elem *elem;
@@ -374,15 +373,15 @@ nc_err_libyang(struct ly_ctx *ctx)
         /* LY_SUCCESS */
         return NULL;
     } else if (ly_errno == LY_EVALID) {
-        switch (ly_vecode(ctx)) {
+        switch (ly_vecode) {
         /* RFC 6020 section 13 errors */
         case LYVE_NOUNIQ:
             e = nc_err(NC_ERR_OP_FAILED, NC_ERR_TYPE_APP);
             nc_err_set_app_tag(e, "data-not-unique");
-            nc_err_set_path(e, ly_errpath(ctx));
+            nc_err_set_path(e, ly_errpath());
 
             /* parse the message and get all the information we need */
-            str = ly_errmsg(ctx);
+            str = ly_errmsg();
             uniqi = strchr(str, '"');
             uniqi++;
             uniqj = strchr(uniqi, '"');
@@ -432,34 +431,33 @@ nc_err_libyang(struct ly_ctx *ctx)
         case LYVE_NOMAX:
             e = nc_err(NC_ERR_OP_FAILED, NC_ERR_TYPE_APP);
             nc_err_set_app_tag(e, "too-many-elements");
-            nc_err_set_path(e, ly_errpath(ctx));
+            nc_err_set_path(e, ly_errpath());
             break;
         case LYVE_NOMIN:
             e = nc_err(NC_ERR_OP_FAILED, NC_ERR_TYPE_APP);
             nc_err_set_app_tag(e, "too-few-elements");
-            nc_err_set_path(e, ly_errpath(ctx));
+            nc_err_set_path(e, ly_errpath());
             break;
         case LYVE_NOMUST:
             e = nc_err(NC_ERR_OP_FAILED, NC_ERR_TYPE_APP);
-            if (ly_errapptag(ctx)) {
-                nc_err_set_app_tag(e, ly_errapptag(ctx));
+            if (ly_errapptag()[0]) {
+                nc_err_set_app_tag(e, ly_errapptag());
             } else {
                 nc_err_set_app_tag(e, "must-violation");
             }
-            nc_err_set_path(e, ly_errpath(ctx));
             break;
         case LYVE_NOREQINS:
         case LYVE_NOLEAFREF:
             e = nc_err(NC_ERR_DATA_MISSING);
             nc_err_set_app_tag(e, "instance-required");
-            nc_err_set_path(e, ly_errpath(ctx));
+            nc_err_set_path(e, ly_errpath());
             break;
         case LYVE_NOMANDCHOICE:
             e = nc_err(NC_ERR_DATA_MISSING);
             nc_err_set_app_tag(e, "missing-choice");
-            nc_err_set_path(e, ly_errpath(ctx));
+            nc_err_set_path(e, ly_errpath());
 
-            str = ly_errmsg(ctx);
+            str = ly_errmsg();
             stri = strchr(str, '"');
             stri++;
             strj = strchr(stri, '"');
@@ -469,40 +467,37 @@ nc_err_libyang(struct ly_ctx *ctx)
             }
             break;
         case LYVE_INELEM:
-            str = ly_errpath(ctx);
+            str = ly_errpath();
             if (!strcmp(str, "/")) {
                 e = nc_err(NC_ERR_OP_NOT_SUPPORTED, NC_ERR_TYPE_APP);
                 /* keep default message */
                 return e;
             } else {
-                e = nc_err(NC_ERR_UNKNOWN_ELEM, NC_ERR_TYPE_PROT, ly_errpath(ctx));
+                e = nc_err(NC_ERR_UNKNOWN_ELEM, NC_ERR_TYPE_PROT, ly_errpath());
             }
             break;
         case LYVE_MISSELEM:
         case LYVE_INORDER:
-            e = nc_err(NC_ERR_MISSING_ELEM, NC_ERR_TYPE_PROT, ly_errpath(ctx));
+            e = nc_err(NC_ERR_MISSING_ELEM, NC_ERR_TYPE_PROT, ly_errpath());
             break;
         case LYVE_INVAL:
-            e = nc_err(NC_ERR_BAD_ELEM, NC_ERR_TYPE_PROT, ly_errpath(ctx));
+            e = nc_err(NC_ERR_BAD_ELEM, NC_ERR_TYPE_PROT, ly_errpath());
             break;
         case LYVE_INATTR:
         case LYVE_MISSATTR:
         case LYVE_INMETA:
-            str = ly_errmsg(ctx);
+            str = ly_errmsg();
             stri = strchr(str, '"');
             stri++;
-            if (!strncmp(stri, "<none>:", 7)) {
-                stri += 7;
-            }
             strj = strchr(stri, '"');
             strj--;
-            attr = strndup(stri, (strj - stri) + 1);
-            if (ly_vecode(ctx) == LYVE_INATTR) {
-                e = nc_err(NC_ERR_UNKNOWN_ATTR, NC_ERR_TYPE_PROT, attr, ly_errpath(ctx));
-            } else if (ly_vecode(ctx) == LYVE_MISSATTR) {
-                e = nc_err(NC_ERR_MISSING_ATTR, NC_ERR_TYPE_PROT, attr, ly_errpath(ctx));
+            attr = strndup(stri, strj - stri);
+            if (ly_vecode == LYVE_INATTR) {
+                e = nc_err(NC_ERR_UNKNOWN_ATTR, NC_ERR_TYPE_PROT, attr, ly_errpath());
+            } else if (ly_vecode == LYVE_MISSATTR) {
+                e = nc_err(NC_ERR_MISSING_ATTR, NC_ERR_TYPE_PROT, attr, ly_errpath());
             } else { /* LYVE_INMETA */
-                e = nc_err(NC_ERR_BAD_ATTR, NC_ERR_TYPE_PROT, attr, ly_errpath(ctx));
+                e = nc_err(NC_ERR_BAD_ATTR, NC_ERR_TYPE_PROT, attr, ly_errpath());
             }
             free(attr);
             break;
@@ -510,10 +505,9 @@ nc_err_libyang(struct ly_ctx *ctx)
         case LYVE_NOWHEN:
             e = nc_err(NC_ERR_INVALID_VALUE, NC_ERR_TYPE_PROT);
             /* LYVE_NOCONSTR (length, range, pattern) can have a specific error-app-tag */
-            if (ly_errapptag(ctx)) {
-                nc_err_set_app_tag(e, ly_errapptag(ctx));
+            if (ly_errapptag()[0]) {
+                nc_err_set_app_tag(e, ly_errapptag());
             }
-            nc_err_set_path(e, ly_errpath(ctx));
             break;
         default:
             e = nc_err(NC_ERR_OP_FAILED, NC_ERR_TYPE_APP);
@@ -523,7 +517,7 @@ nc_err_libyang(struct ly_ctx *ctx)
         /* non-validation (internal) error */
         e = nc_err(NC_ERR_OP_FAILED, NC_ERR_TYPE_APP);
     }
-    nc_err_set_msg(e, ly_errmsg(ctx), "en");
+    nc_err_set_msg(e, ly_errmsg(), "en");
     return e;
 }
 
@@ -630,6 +624,8 @@ nc_err_set_msg(struct nc_server_error *err, const char *error_message, const cha
     }
     if (lang) {
         err->message_lang = lydict_insert(server_opts.ctx, lang, 0);
+    } else {
+        lang = NULL;
     }
 
     return 0;
@@ -828,45 +824,12 @@ API struct nc_server_notif *
 nc_server_notif_new(struct lyd_node* event, char *eventtime, NC_PARAMTYPE paramtype)
 {
     struct nc_server_notif *ntf;
-    struct lyd_node *elem;
-    bool found_notif = false;
 
-    if (!event) {
+    if (!event || event->schema->nodetype != LYS_NOTIF) {
         ERRARG("event");
         return NULL;
     } else if (!eventtime) {
         ERRARG("eventtime");
-        return NULL;
-    }
-
-    /* check that there is a notification */
-    for (elem = event; elem && !found_notif; elem = elem->child) {
-next_node:
-        switch (elem->schema->nodetype) {
-        case LYS_LEAF:
-            /* key, skip it */
-            elem = elem->next;
-            if (!elem) {
-                /* error */
-                ERRARG("event");
-                return NULL;
-            }
-            goto next_node;
-        case LYS_CONTAINER:
-        case LYS_LIST:
-            /* ok */
-            break;
-        case LYS_NOTIF:
-            found_notif = true;
-            break;
-        default:
-            /* error */
-            ERRARG("event");
-            return NULL;
-        }
-    }
-    if (!found_notif) {
-        ERRARG("event");
         return NULL;
     }
 

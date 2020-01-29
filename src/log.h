@@ -20,11 +20,6 @@ extern "C" {
 #endif
 
 /**
- * @addtogroup misc
- * @{
- */
-
-/**
  * @brief Verbosity levels.
  */
 typedef enum NC_VERB_LEVEL {
@@ -76,8 +71,6 @@ void nc_libssh_thread_verbosity(int level);
  * @param[in] clb Callback that is called for every message.
  */
 void nc_set_print_clb(void (*clb)(NC_VERB_LEVEL, const char *));
-
-/**@} Miscellaneous */
 
 #ifdef __cplusplus
 }

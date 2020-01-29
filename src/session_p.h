@@ -18,7 +18,6 @@
 
 #include <stdint.h>
 #include <pthread.h>
-#include <sys/stat.h>
 
 #include <libyang/libyang.h>
 
@@ -55,16 +54,10 @@ struct nc_client_ssh_opts {
     uint16_t key_count;
 
     /* SSH authentication callbacks */
-    int (*auth_hostkey_check)(const char *, ssh_session, void *);
-    char *(*auth_password)(const char *, const char *, void *);
-    char *(*auth_interactive)(const char *, const char *, const char *, int, void *);
-    char *(*auth_privkey_passphrase)(const char *, void *);
-
-    /* private data for the callbacks */
-    void *auth_hostkey_check_priv;
-    void *auth_password_priv;
-    void *auth_interactive_priv;
-    void *auth_privkey_passphrase_priv;
+    int (*auth_hostkey_check)(const char *hostname, ssh_session session);
+    char *(*auth_password)(const char *, const char *);
+    char *(*auth_interactive)(const char *, const char *, const char *, int);
+    char *(*auth_privkey_passphrase)(const char *);
 
     char *username;
 };
@@ -74,6 +67,7 @@ struct nc_server_ssh_opts {
     /* SSH bind options */
     const char **hostkeys;
     uint8_t hostkey_count;
+    const char *banner;
 
     int auth_methods;
     uint16_t auth_attempts;
@@ -123,26 +117,8 @@ struct nc_server_tls_opts {
 #endif /* NC_ENABLED_TLS */
 
 /* ACCESS unlocked */
-struct nc_keepalives {
-    int enabled;
-    uint16_t idle_time;
-    uint16_t max_probes;
-    uint16_t probe_interval;
-};
-
-/* ACCESS unlocked */
-struct nc_server_unix_opts {
-    mode_t mode;
-    uid_t uid;
-    gid_t gid;
-};
-
-/* ACCESS unlocked */
 struct nc_client_opts {
     char *schema_searchpath;
-    ly_module_imp_clb schema_clb;
-    void *schema_clb_data;
-    struct nc_keepalives ka;
 
     struct nc_bind {
         const char *address;
@@ -152,20 +128,6 @@ struct nc_client_opts {
     } *ch_binds;
     NC_TRANSPORT_IMPL *ch_bind_ti;
     uint16_t ch_bind_count;
-};
-
-/* ACCESS unlocked */
-struct nc_client_context {
-    unsigned int refcount;
-    struct nc_client_opts opts;
-#ifdef NC_ENABLED_SSH
-    struct nc_client_ssh_opts ssh_opts;
-    struct nc_client_ssh_opts ssh_ch_opts;
-#endif /* NC_ENABLED_SSH */
-#ifdef NC_ENABLED_TLS
-    struct nc_client_tls_opts tls_opts;
-    struct nc_client_tls_opts tls_ch_opts;
-#endif /* NC_ENABLED_TLS */
 };
 
 struct nc_server_opts {
@@ -181,34 +143,16 @@ struct nc_server_opts {
     /* ACCESS unlocked */
     uint16_t hello_timeout;
     uint16_t idle_timeout;
-#ifdef NC_ENABLED_SSH
-    int (*passwd_auth_clb)(const struct nc_session *session, const char *password, void *user_data);
-    void *passwd_auth_data;
-    void (*passwd_auth_data_free)(void *data);
-
-    int (*pubkey_auth_clb)(const struct nc_session *session, ssh_key key, void *user_data);
-    void *pubkey_auth_data;
-    void (*pubkey_auth_data_free)(void *data);
-
-    int (*interactive_auth_clb)(const struct nc_session *session, ssh_message msg, void *user_data);
-    void *interactive_auth_data;
-    void (*interactive_auth_data_free)(void *data);
-#endif
 #ifdef NC_ENABLED_TLS
     int (*user_verify_clb)(const struct nc_session *session);
 
     int (*server_cert_clb)(const char *name, void *user_data, char **cert_path, char **cert_data,char **privkey_path,
-            char **privkey_data, NC_SSH_KEY_TYPE *privkey_type);
+                           char **privkey_data, int *privkey_data_rsa);
     void *server_cert_data;
     void (*server_cert_data_free)(void *data);
 
-    int (*server_cert_chain_clb)(const char *name, void *user_data, char ***cert_paths, int *cert_path_count,
-            char ***cert_data, int *cert_data_count);
-    void *server_cert_chain_data;
-    void (*server_cert_chain_data_free)(void *data);
-
     int (*trusted_cert_list_clb)(const char *name, void *user_data, char ***cert_paths, int *cert_path_count,
-            char ***cert_data, int *cert_data_count);
+                                 char ***cert_data, int *cert_data_count);
     void *trusted_cert_list_data;
     void (*trusted_cert_list_data_free)(void *data);
 #endif
@@ -224,7 +168,7 @@ struct nc_server_opts {
     uint16_t authkey_count;
     pthread_mutex_t authkey_lock;
 
-    int (*hostkey_clb)(const char *name, void *user_data, char **privkey_path, char **privkey_data, NC_SSH_KEY_TYPE *privkey_type);
+    int (*hostkey_clb)(const char *name, void *user_data, char **privkey_path, char **privkey_data, int *privkey_data_rsa);
     void *hostkey_data;
     void (*hostkey_data_free)(void *data);
 #endif
@@ -238,7 +182,6 @@ struct nc_server_opts {
     struct nc_endpt {
         const char *name;
         NC_TRANSPORT_IMPL ti;
-        struct nc_keepalives ka;
         union {
 #ifdef NC_ENABLED_SSH
             struct nc_server_ssh_opts *ssh;
@@ -246,7 +189,6 @@ struct nc_server_opts {
 #ifdef NC_ENABLED_TLS
             struct nc_server_tls_opts *tls;
 #endif
-            struct nc_server_unix_opts *unixsock;
         } opts;
     } *endpts;
     uint16_t endpt_count;
@@ -256,42 +198,43 @@ struct nc_server_opts {
      *                modify CH clients - READ lock ch_client_lock + ch_client_lock */
     struct nc_ch_client {
         const char *name;
+        NC_TRANSPORT_IMPL ti;
         struct nc_ch_endpt {
             const char *name;
-            NC_TRANSPORT_IMPL ti;
             const char *address;
             uint16_t port;
-            int sock_pending;
-            struct nc_keepalives ka;
-            union {
-#ifdef NC_ENABLED_SSH
-                struct nc_server_ssh_opts *ssh;
-#endif
-#ifdef NC_ENABLED_TLS
-                struct nc_server_tls_opts *tls;
-#endif
-            } opts;
         } *ch_endpts;
         uint16_t ch_endpt_count;
+        union {
+#ifdef NC_ENABLED_SSH
+            struct nc_server_ssh_opts *ssh;
+#endif
+#ifdef NC_ENABLED_TLS
+            struct nc_server_tls_opts *tls;
+#endif
+        } opts;
         NC_CH_CONN_TYPE conn_type;
         union {
             struct {
-                uint16_t period;
-                time_t anchor_time;
+                uint32_t idle_timeout;
+                uint16_t ka_max_wait;
+                uint8_t ka_max_attempts;
+            } persist;
+            struct {
                 uint16_t idle_timeout;
+                uint16_t reconnect_timeout;
             } period;
         } conn;
         NC_CH_START_WITH start_with;
         uint8_t max_attempts;
-        uint32_t id;
         pthread_mutex_t lock;
     } *ch_clients;
     uint16_t ch_client_count;
     pthread_rwlock_t ch_client_lock;
 
-    /* Atomic IDs */
-    ATOMIC_UINT32_T new_session_id;
-    ATOMIC_UINT32_T new_client_id;
+    /* ACCESS locked with sid_lock */
+    uint32_t new_session_id;
+    pthread_spinlock_t sid_lock;
 };
 
 /**
@@ -319,12 +262,7 @@ struct nc_server_opts {
 /**
  * Timeout in msec for acquiring a lock of a pollsession structure.
  */
-#define NC_PS_LOCK_TIMEOUT 200
-
-/**
- * Timeout in msec for a thread to wait for its turn to work with a pollsession structure.
- */
-#define NC_PS_QUEUE_TIMEOUT 5000
+#define NC_PS_LOCK_TIMEOUT 500
 
 /**
  * Time slept in msec if no endpoint was created for a running Call Home client.
@@ -374,7 +312,6 @@ struct nc_msg_cont {
 struct nc_session {
     NC_STATUS status;            /**< status of the session */
     NC_SESSION_TERM_REASON term_reason; /**< reason of termination, if status is NC_STATUS_INVALID */
-    uint32_t killed_by;          /**< session responsible for termination, if term_reason is NC_SESSION_TERM_KILLED */
     NC_SIDE side;                /**< side of the session: client or server */
 
     /* NETCONF data */
@@ -383,17 +320,16 @@ struct nc_session {
 
     /* Transport implementation */
     NC_TRANSPORT_IMPL ti_type;   /**< transport implementation type to select items from ti union */
-    pthread_mutex_t *io_lock;    /**< input/output lock, note that in case of libssh TI, it will be shared
-                                      with other NETCONF sessions on the same SSH session (but different SSH channel) */
-
+    pthread_mutex_t *ti_lock;    /**< lock to access ti. Note that in case of libssh TI, it can be shared with other
+                                      NETCONF sessions on the same SSH session (but different SSH channel) */
+    pthread_cond_t *ti_cond;     /**< ti_inuse condition */
+    volatile int *ti_inuse;      /**< variable indicating whether TI is being communicated on or not, protected by
+                                      ti_cond and ti_lock */
     union {
         struct {
             int in;              /**< input file descriptor */
             int out;             /**< output file descriptor */
         } fd;                    /**< NC_TI_FD transport implementation structure */
-        struct {
-            int sock;            /**< socket file descriptor */
-        } unixsock;              /**< NC_TI_UNIX transport implementation structure */
 #ifdef NC_ENABLED_SSH
         struct {
             ssh_channel channel;
@@ -410,12 +346,11 @@ struct nc_session {
     const char *username;
     const char *host;
     uint16_t port;
-    const char *path;              /**< socket path in case of unix socket */
 
     /* other */
     struct ly_ctx *ctx;            /**< libyang context of the session */
     void *data;                    /**< arbitrary user data */
-    uint8_t flags;                 /**< various flags of the session */
+    uint8_t flags;                 /**< various flags of the session - TODO combine with status and/or side */
 #define NC_SESSION_SHAREDCTX 0x01
 #define NC_SESSION_CALLHOME 0x02
 
@@ -434,15 +369,9 @@ struct nc_session {
         } client;
         struct {
             /* server side only data */
-            time_t session_start;          /**< real time the session was created */
-            time_t last_rpc;               /**< monotonic time (seconds) the last RPC was received on this session */
+            time_t session_start;          /**< time the session was created */
+            time_t last_rpc;               /**< time the last RPC was received on this session */
             int ntf_status;                /**< flag whether the session is subscribed to any stream */
-
-            pthread_mutex_t *rpc_lock;   /**< lock indicating RPC processing, this lock is always locked before io_lock!! */
-            pthread_cond_t *rpc_cond;    /**< RPC condition (tied with rpc_lock and rpc_inuse) */
-            volatile int *rpc_inuse;     /**< variable indicating whether there is RPC being processed or not (tied with
-                                              rpc_cond and rpc_lock) */
-
             pthread_mutex_t *ch_lock;      /**< Call Home thread lock */
             pthread_cond_t *ch_cond;       /**< Call Home thread condition */
 
@@ -472,14 +401,12 @@ enum nc_ps_session_state {
     NC_PS_STATE_INVALID        /**< session is invalid and was already returned by another poll */
 };
 
-struct nc_ps_session {
-    struct nc_session *session;
-    enum nc_ps_session_state state;
-};
-
 /* ACCESS locked */
 struct nc_pollsession {
-    struct nc_ps_session **sessions;
+    struct {
+        struct nc_session *session;
+        enum nc_ps_session_state state;
+    } *sessions;
     uint16_t session_count;
     uint16_t last_event_session;
 
@@ -487,7 +414,7 @@ struct nc_pollsession {
     pthread_mutex_t lock;
     uint8_t queue[NC_PS_QUEUE_SIZE]; /**< round buffer, queue is empty when queue_len == 0 */
     uint8_t queue_begin;             /**< queue starts on queue[queue_begin] */
-    uint8_t queue_len;               /**< queue ends on queue[(queue_begin + queue_len - 1) % NC_PS_QUEUE_SIZE] */
+    uint8_t queue_len;               /**< queue ends on queue[queue_begin + queue_len - 1] */
 };
 
 struct nc_ntf_thread_arg {
@@ -497,33 +424,23 @@ struct nc_ntf_thread_arg {
 
 void *nc_realloc(void *ptr, size_t size);
 
-NC_MSG_TYPE nc_send_msg_io(struct nc_session *session, int io_timeout, struct lyd_node *op);
+NC_MSG_TYPE nc_send_msg(struct nc_session *session, struct lyd_node *op);
 
 #ifndef HAVE_PTHREAD_MUTEX_TIMEDLOCK
 int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime);
 #endif
 
-int nc_gettimespec_mono(struct timespec *ts);
+int nc_gettimespec(struct timespec *ts);
 
-int nc_gettimespec_real(struct timespec *ts);
-
-int32_t nc_difftimespec(const struct timespec *ts1, const struct timespec *ts2);
+int32_t nc_difftimespec(struct timespec *ts1, struct timespec *ts2);
 
 void nc_addtimespec(struct timespec *ts, uint32_t msec);
 
-const char *nc_keytype2str(NC_SSH_KEY_TYPE type);
+struct nc_session *nc_new_session(int not_allocate_ti);
 
-int nc_sock_enable_keepalive(int sock, struct nc_keepalives *ka);
+int nc_session_lock(struct nc_session *session, int timeout, const char *func);
 
-struct nc_session *nc_new_session(NC_SIDE side, int shared_ti);
-
-int nc_session_rpc_lock(struct nc_session *session, int timeout, const char *func);
-
-int nc_session_rpc_unlock(struct nc_session *session, int timeout, const char *func);
-
-int nc_session_io_lock(struct nc_session *session, int timeout, const char *func);
-
-int nc_session_io_unlock(struct nc_session *session, const char *func);
+int nc_session_unlock(struct nc_session *session, int timeout, const char *func);
 
 int nc_ps_lock(struct nc_pollsession *ps, uint8_t *id, const char *func);
 
@@ -546,20 +463,16 @@ int nc_ctx_check_and_fill(struct nc_session *session);
  * @return NC_MSG_HELLO on success, NC_MSG_BAD_HELLO on client \<hello\> message parsing fail
  * (server-side only), NC_MSG_WOULDBLOCK on timeout, NC_MSG_ERROR on other error.
  */
-NC_MSG_TYPE nc_handshake_io(struct nc_session *session);
+NC_MSG_TYPE nc_handshake(struct nc_session *session);
 
 /**
  * @brief Create a socket connection.
  *
  * @param[in] host Hostname to connect to.
  * @param[in] port Port to connect on.
- * @param[in] timeout for blocking the connect+select call (-1 for infinite).
- * @param[in] ka Keepalives parameters.
- * @param[in,out] sock_pending for exchanging the pending socket, if the blocking timeout was != -1
- * @param[out] ip_host Optional parameter with string IP address of the connected host.
  * @return Connected socket or -1 on error.
  */
-int nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host);
+int nc_sock_connect(const char *host, uint16_t port);
 
 /**
  * @brief Accept a new socket connection.
@@ -573,23 +486,13 @@ int nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keep
 int nc_sock_accept(int sock, int timeout, char **peer_host, uint16_t *peer_port);
 
 /**
- * @brief Create a listening socket (AF_INET or AF_INET6).
+ * @brief Create a listening socket.
  *
  * @param[in] address IP address to listen on.
  * @param[in] port Port to listen on.
- * @param[in] ka Keepalives parameters.
  * @return Listening socket, -1 on error.
  */
-int nc_sock_listen_inet(const char *address, uint16_t port, struct nc_keepalives *ka);
-
-/**
- * @brief Create a listening socket (AF_UNIX).
- *
- * @param[in] address UNIX address to listen on.
- * @param[in] opts The server options (unix permissions).
- * @return Listening socket, -1 on error.
- */
-int nc_sock_listen_unix(const char *address, const struct nc_server_unix_opts *opts);
+int nc_sock_listen(const char *address, uint16_t port);
 
 /**
  * @brief Accept a new connection on a listening socket.
@@ -615,16 +518,14 @@ int nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout
 struct nc_endpt *nc_server_endpt_lock_get(const char *name, NC_TRANSPORT_IMPL ti, uint16_t *idx);
 
 /**
- * @brief Lock CH client structures for reading and lock the specific client.
+ * @brief Lock CH client structures for reading and the specific client.
  *
  * @param[in] name Name of the CH client.
- * @param[in] endpt_name Endpoint of the CH client.
  * @param[in] ti Expected transport.
- * @param[out] client_p Pointer to the CH client.
- * @return CH endpoint structure.
+ * @param[out] idx Index of the client. Optional.
+ * @return CH client structure.
  */
-struct nc_ch_endpt *nc_server_ch_client_lock(const char *name, const char *endpt_name, NC_TRANSPORT_IMPL ti,
-        struct nc_ch_client **client_p);
+struct nc_ch_client *nc_server_ch_client_lock(const char *name, NC_TRANSPORT_IMPL ti, uint16_t *idx);
 
 /**
  * @brief Unlock CH client strcutures and the specific client.
@@ -706,7 +607,6 @@ int nc_sshcb_msg(ssh_session sshsession, ssh_message msg, void *data);
 void nc_server_ssh_clear_opts(struct nc_server_ssh_opts *opts);
 
 void nc_client_ssh_destroy_opts(void);
-void _nc_client_ssh_destroy_opts(struct nc_client_ssh_opts *opts);
 
 #endif /* NC_ENABLED_SSH */
 
@@ -727,7 +627,6 @@ int nc_accept_tls_session(struct nc_session *session, int sock, int timeout);
 void nc_server_tls_clear_opts(struct nc_server_tls_opts *opts);
 
 void nc_client_tls_destroy_opts(void);
-void _nc_client_tls_destroy_opts(struct nc_client_tls_opts *opts);
 
 #endif /* NC_ENABLED_TLS */
 
@@ -743,14 +642,14 @@ void _nc_client_tls_destroy_opts(struct nc_client_tls_opts *opts);
  * libyang XML tree and the message type is detected from the top level element.
  *
  * @param[in] session NETCONF session from which the message is being read.
- * @param[in] io_timeout Timeout in milliseconds. Negative value means infinite timeout,
+ * @param[in] timeout Timeout in milliseconds. Negative value means infinite timeout,
  *            zero value causes to return immediately.
  * @param[out] data XML tree built from the read data.
  * @return Type of the read message. #NC_MSG_WOULDBLOCK is returned if timeout is positive
  * (or zero) value and it passed out without any data on the wire. #NC_MSG_ERROR is
  * returned on error and #NC_MSG_NONE is never returned by this function.
  */
-NC_MSG_TYPE nc_read_msg_poll_io(struct nc_session* session, int io_timeout, struct lyxml_elem **data);
+NC_MSG_TYPE nc_read_msg_poll(struct nc_session* session, int timeout, struct lyxml_elem **data);
 
 /**
  * @brief Read message from the wire.
@@ -759,23 +658,17 @@ NC_MSG_TYPE nc_read_msg_poll_io(struct nc_session* session, int io_timeout, stru
  * libyang XML tree and the message type is detected from the top level element.
  *
  * @param[in] session NETCONF session from which the message is being read.
- * @param[in] io_timeout Timeout in milliseconds. Negative value means infinite timeout,
- *            zero value causes to return immediately.
  * @param[out] data XML tree built from the read data.
- * @param[in] passing_io_lock True if \p session IO lock is already held. This function always unlocks
- *            it before returning!
  * @return Type of the read message. #NC_MSG_WOULDBLOCK is returned if timeout is positive
  * (or zero) value and it passed out without any data on the wire. #NC_MSG_ERROR is
  * returned on error and #NC_MSG_NONE is never returned by this function.
  */
-NC_MSG_TYPE nc_read_msg_io(struct nc_session* session, int io_timeout, struct lyxml_elem **data, int passing_io_lock);
+NC_MSG_TYPE nc_read_msg(struct nc_session* session, struct lyxml_elem **data);
 
 /**
  * @brief Write message into wire.
  *
  * @param[in] session NETCONF session to which the message will be written.
- * @param[in] io_timeout Timeout in milliseconds. Negative value means infinite timeout,
- *            zero value causes to return immediately.
  * @param[in] type The type of the message to write, specified as #NC_MSG_TYPE value. According to the type, the
  * specific additional parameters are required or accepted:
  * - #NC_MSG_RPC
@@ -788,16 +681,10 @@ NC_MSG_TYPE nc_read_msg_io(struct nc_session* session, int io_timeout, struct ly
  *   - `struct lyxml_node *rpc_elem;` - root of the RPC object to reply to. Required parameter.
  *   - `struct nc_server_reply *reply;` - RPC reply. Required parameter.
  * - #NC_MSG_NOTIF
- *   - `struct nc_server_notif *notif;` - notification object. Required parameter.
- * - #NC_MSG_HELLO
- *   - `const char **capabs;` - capabilities array ended with NULL. Required parameter.
- *   - `uint32_t *sid;` - session ID to be included in the hello message. Optional parameter.
- *
- * @return Type of the written message. #NC_MSG_WOULDBLOCK is returned if timeout is positive
- * (or zero) value and IO lock could not be acquired in that time. #NC_MSG_ERROR is
- * returned on error and #NC_MSG_NONE is never returned by this function.
+ *   - TODO: content
+ * @return 0 on success
  */
-NC_MSG_TYPE nc_write_msg_io(struct nc_session *session, int io_timeout, int type, ...);
+int nc_write_msg(struct nc_session *session, int type, ...);
 
 /**
  * @brief Check whether a session is still connected (on transport layer).

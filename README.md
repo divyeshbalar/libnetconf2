@@ -5,22 +5,11 @@
 [![Coverity Scan Build Status](https://scan.coverity.com/projects/7642/badge.svg)](https://scan.coverity.com/projects/7642)
 
 **libnetconf2** is a NETCONF library in C intended for building NETCONF clients
-and servers. NETCONF is the [NETwork CONFiguration protocol](http://trac.tools.ietf.org/wg/netconf/trac/wiki)
-introduced by IETF.
+and servers. NETCONF is the [NETwork CONFiguration protocol]
+(http://trac.tools.ietf.org/wg/netconf/trac/wiki) introduced by IETF.
 
-**libnetconf2** is a NETCONF library in C handling NETCONF authentication and all NETCONF RPC communication both server
-and client-side. Note that NETCONF datastore implementation is not a part of this library. The library supports both
-NETCONF 1.0 ([RFC 4741](https://tools.ietf.org/html/rfc4741)) as well as NETCONF 1.1
-([RFC 6241](https://tools.ietf.org/html/rfc6241)). The main features include:
-
-* NETCONF over SSH ([RFC 4742](https://tools.ietf.org/html/rfc4742), [RFC 6242](https://tools.ietf.org/html/rfc6242)),
-  using [libssh](https://www.libssh.org/).
-* NETCONF over TLS ([RFC 7589](https://tools.ietf.org/html/rfc7589)), using [OpenSSL](https://www.openssl.org/).
-  * DNSSEC SSH Key Fingerprints ([RFC 4255](https://tools.ietf.org/html/rfc4255))
-* NETCONF over pre-established transport sessions (using this mechanism the communication can be tunneled through
-  sshd(8), for instance).
-* NETCONF Call Home ([RFC 8071](https://tools.ietf.org/html/rfc8071)).
-* NETCONF Event Notifications ([RFC 5277](https://tools.ietf.org/html/rfc5277)),
+The library provides functions to connect NETCONF client and server to each
+other via SSH and to send, receive and process NETCONF messages.
 
 **libnetconf2** is maintained and further developed by the [Tools for
 Monitoring and Configuration](https://www.liberouter.org/) department of
@@ -29,19 +18,9 @@ is welcome. Please inform us about your experiences with using **libnetconf2**
 via the [issue tracker](https://github.com/CESNET/libnetconf/issues).
 
 Besides the [**libyang**](https://github.com/CESNET/libyang), **libnetconf2** is
-another basic building block for the [**Netopeer2** toolset](https://github.com/CESNET/Netopeer2).
-For a reference implementation of NETCONF client and server, check the
-**Netopeer2** project.
-
-## Branches
-
-The project uses 2 main branches `master` and `devel`. Other branches should not be cloned. In `master` there are files of the
-last official *release*. Any latest improvements and changes, which were tested at least briefly are found in `devel`. On every
-new *release*, `devel` is merged into `master`.
-
-This means that when only stable official releases are to be used, either `master` can be used or specific *releases* downloaded.
-If all the latest bugfixes should be applied, `devel` branch is the  one to be used. Note that whenever **a new issue is created**
-and it occurs on the `master` branch, the **first response will likely be** to use `devel` before any further provided support.
+another basic building block for the [**Netopeer2** toolset]
+(https://github.com/CESNET/Netopeer2). For a reference implementation of NETCONF
+client and server, check the **Netopeer2** project.
 
 ## libnetconf vs libnetconf2
 
@@ -55,9 +34,9 @@ of them is more suitable for your needs.
 To represent the schema and data trees, **libnetconf** uses libxml2, which is
 intended for different purposes - schema and data trees connected with YANG
 have specific needs and restrictions in comparison to more generic XML.
-Therefore, in **libnetconf2**, we have completely replaced libxml2 by
-[libyang](https://github.com/CESNET/libyang). It is much more efficient in work
-with YANG modeled data (which is the case of NETCONF messages) and this advantage
+Therefore, in **libnetconf2**, we have completely replaced libxml2 by [libyang]
+(https://github.com/CESNET/libyang). It is much more efficient in work with
+YANG modeled data (which is the case of NETCONF messages) and this advantage
 then applies also to **libnetconf2**. The library connects data with the YANG
 schemas, so for example the data validation according to the provided YANG
 schemas is done internally by libyang instead of using external and extremely
@@ -94,6 +73,15 @@ reference implementation, you can check the Netopeer2 server.
 
 In contrast to **libnetconf**, **libnetconf2** actually implements more of the
 Call Home functionality.
+
+## Features
+
+* NETCONF v1.0 and v1.1 compliant ([RFC 6241](https://tools.ietf.org/html/rfc6241))
+* NETCONF over SSH ([RFC 6242](https://tools.ietf.org/html/rfc6242)) including Chunked Framing Mechanism
+  * DNSSEC SSH Key Fingerprints ([RFC 4255](https://tools.ietf.org/html/rfc4255))
+* NETCONF over TLS ([RFC 5539bis](https://tools.ietf.org/html/draft-ietf-netconf-rfc5539bis-05))
+* Transport support for NETCONF Event Notifications ([RFC 5277](https://tools.ietf.org/html/rfc5277))
+* NETCONF Call Home ([NETCONF Call Home Draft](https://tools.ietf.org/html/draft-ietf-netconf-call-home-17))
 
 # Installation
 

@@ -16,26 +16,12 @@
 #ifndef NC_MESSAGES_CLIENT_H_
 #define NC_MESSAGES_CLIENT_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stdint.h>
 
 #include "netconf.h"
 
 /**
- * @defgroup client_msg Client Messages
- * @ingroup client
- *
- * @brief Functions to create NETCONF RPCs (or actions) and process replies received from the server.
- * @{
- */
-
-/**
  * @brief Enumeration of RPC types
- *
- * Note that NC_RPC_CLOSE is not defined since sending \<close-session\> is done implicitly by nc_session_free()
  */
 typedef enum {
     NC_RPC_UNKNOWN = 0, /**< invalid RPC. */
@@ -49,6 +35,7 @@ typedef enum {
     NC_RPC_LOCK,        /**< \<lock\> RPC. */
     NC_RPC_UNLOCK,      /**< \<unlock\> RPC. */
     NC_RPC_GET,         /**< \<get\> RPC. */
+    /* NC_RPC_CLOSE is not defined since sending \<close-session\> is done by nc_session_free() */
     NC_RPC_KILL,        /**< \<kill-session\> RPC. */
     NC_RPC_COMMIT,      /**< \<commit\> RPC. */
     NC_RPC_DISCARD,     /**< \<discard-changes\> RPC. */
@@ -59,11 +46,7 @@ typedef enum {
     NC_RPC_GETSCHEMA,   /**< \<get-schema\> RPC. */
 
     /* notifications */
-    NC_RPC_SUBSCRIBE,   /**< \<create-subscription\> RPC. */
-
-    /* ietf-netconf-nmda */
-    NC_RPC_GETDATA,     /**< \<get-data\> RPC. */
-    NC_RPC_EDITDATA,    /**< \<edit-data\> RPC. */
+    NC_RPC_SUBSCRIBE    /**< \<create-subscription\> RPC. */
 } NC_RPC_TYPE;
 
 /**
@@ -100,41 +83,57 @@ typedef enum {
  * @brief NETCONF error structure representation
  */
 struct nc_err {
-    /** @brief \<error-type\>, error layer where the error occurred. */
+    /**
+     * @brief \<error-type\>, error layer where the error occurred.
+     */
     const char *type;
-    /** @brief \<error-tag\>. */
+    /**
+     * @brief \<error-tag\>.
+     */
     const char *tag;
-    /** @brief \<error-severity\>. */
+    /**
+     * @brief \<error-severity\>.
+     */
     const char *severity;
-    /** @brief \<error-app-tag\>, the data-model-specific or implementation-specific error condition, if one exists. */
+    /**
+     * @brief \<error-app-tag\>, the data-model-specific or implementation-specific error condition, if one exists.
+     */
     const char *apptag;
-    /** @brief \<error-path\>, XPATH expression identifying the element with the error. */
+    /**
+     * @brief \<error-path\>, XPATH expression identifying the element with the error.
+     */
     const char *path;
-    /** @brief \<error-message\>, Human-readable description of the error. */
+    /**
+     * @brief \<error-message\>, Human-readable description of the error.
+     */
     const char *message;
-    /** @brief xml:lang attribute of the error-message. */
     const char *message_lang;
 
     /* <error-info> */
 
-    /** @brief \<session-id\>, session ID of the session holding the requested lock. Part of \<error-info\>. */
+    /**
+     * @brief \<session-id\>, session ID of the session holding the requested lock.
+     */
     const char *sid;
-    /** @brief \<bad-attr\>, array of the names of the data-model-specific XML attributes that caused the error. Part of \<error-info\>. */
+    /**
+     * @brief \<bad-attr\>, the name of the data-model-specific XML attribute that caused the error.
+     */
     const char **attr;
-    /** @brief \<bad-element\>, array of the names of the data-model-specific XML element that caused the error. Part of \<error-info\>. */
-    const char **elem;
-    /** @brief \<bad-namespace\>, array of the unexpected XML namespaces that caused the error. Part of \<error-info\>. */
-    const char **ns;
-    /** @brief Array of the remaining non-standard elements. */
-    struct lyxml_elem **other;
-
-    /** @brief Number of items in the attr array */
     uint16_t attr_count;
-    /** @brief Number of items in the elem array */
+    /**
+     * @brief \<bad-element\>, the name of the data-model-specific XML element that caused the error.
+     */
+    const char **elem;
     uint16_t elem_count;
-    /** @brief Number of items in the ns array */
+    /**
+     * @brief \<bad-namespace\>, the name of the unexpected XML namespace that caused the error.
+     */
+    const char **ns;
     uint16_t ns_count;
-    /** @brief Number of items in the other array */
+    /**
+     * @brief Remaining non-standard elements.
+     */
+    struct lyxml_elem **other;
     uint16_t other_count;
 };
 
@@ -157,9 +156,8 @@ struct nc_reply_data {
     NC_RPL type;            /**< NC_RPL_DATA */
     struct lyd_node *data;  /**< libyang RPC reply data tree (output of an RPC),
                                  \<get\> and \<get-config\> replies are special,
-                                 in those cases there is the configuration itself,
-                                 it should be validated as such (using \b LYD_OPT_GET or \b LYD_OPT_GETCONFIG),
-                                 and it can be NULL in a valid reply. */
+                                 in those cases there is the configuration itself
+                                 and it should be validated as such (using \b LYD_OPT_GET or \b LYD_OPT_GETCONFIG). */
 };
 
 /**
@@ -225,7 +223,7 @@ struct nc_rpc *nc_rpc_act_generic_xml(const char *xml_str, NC_PARAMTYPE paramtyp
  * needed NETCONF capabilities for the RPC.
  *
  * @param[in] source Source datastore being queried.
- * @param[in] filter Optional filter data, an XML subtree or XPath expression (with JSON prefixes).
+ * @param[in] filter Optional filter data, an XML subtree or XPath expression.
  * @param[in] wd_mode Optional with-defaults capability mode.
  * @param[in] paramtype How to further manage data parameters.
  * @return Created RPC object to send via a NETCONF session or NULL in case of (memory allocation) error.
@@ -326,7 +324,7 @@ struct nc_rpc *nc_rpc_unlock(NC_DATASTORE target);
  * check. Created object can be sent via any NETCONF session which supports all the
  * needed NETCONF capabilities for the RPC.
  *
- * @param[in] filter Optional filter data, an XML subtree or XPath expression (with JSON prefixes).
+ * @param[in] filter Optional filter data, an XML subtree or XPath expression.
  * @param[in] wd_mode Optional with-defaults capability mode.
  * @param[in] paramtype How to further manage data parameters.
  * @return Created RPC object to send via a NETCONF session or NULL in case of (memory allocation) error.
@@ -437,7 +435,7 @@ struct nc_rpc *nc_rpc_getschema(const char *identifier, const char *version, con
  * needed NETCONF capabilities for the RPC.
  *
  * @param[in] stream_name Optional name of a NETCONF stream to subscribe to.
- * @param[in] filter Optional filter data, an XML subtree or XPath expression (with JSON prefixes).
+ * @param[in] filter Optional filter data, an XML subtree or XPath expression.
  * @param[in] start_time Optional YANG datetime identifying the start of the subscription.
  * @param[in] stop_time Optional YANG datetime identifying the end of the subscription.
  * @param[in] paramtype How to further manage data parameters.
@@ -445,49 +443,6 @@ struct nc_rpc *nc_rpc_getschema(const char *identifier, const char *version, con
  */
 struct nc_rpc *nc_rpc_subscribe(const char *stream_name, const char *filter, const char *start_time,
                                 const char *stop_time, NC_PARAMTYPE paramtype);
-
-/**
- * @brief Create NETCONF RPC \<get-data\>
- *
- * Note that functions to create any RPC object do not check validity of the provided
- * parameters. It is checked later while sending the RPC via a specific NETCONF session
- * (#nc_send_rpc()) since the NETCONF capabilities of the session are needed for such a
- * check. Created object can be sent via any NETCONF session which supports all the
- * needed NETCONF capabilities for the RPC.
- *
- * @param[in] datastore Source datastore, foreign identity so a module name prefix is required.
- * @param[in] filter Optional filter data, an XML subtree or XPath expression (with JSON prefixes).
- * @param[in] config_filter Optional config filter, "true" for config-only data, "false" for state-only data.
- * @param[in] origin_filter Optional origin filter array, selects only nodes of this or derived origin.
- * @param[in] origin_filter_count Count of filters is \p origin_filter.
- * @param[in] neg_origin_filter Whether origin filters are negated or not.
- * @param[in] max_depth Maximum depth of returned subtrees, 0 for unlimited.
- * @param[in] with_origin Whether return data origin.
- * @param[in] wd_mode Optional with-defaults capability mode.
- * @param[in] paramtype How to further manage data parameters.
- * @return Created RPC object to send via a NETCONF session or NULL in case of (memory allocation) error.
- */
-struct nc_rpc *nc_rpc_getdata(const char *datastore, const char *filter, const char *config_filter, char **origin_filter,
-                              int origin_filter_count, int neg_origin_filter, uint16_t max_depth, int with_origin,
-                              NC_WD_MODE wd_mode, NC_PARAMTYPE paramtype);
-
-/**
- * @brief Create NETCONF RPC \<get-data\>
- *
- * Note that functions to create any RPC object do not check validity of the provided
- * parameters. It is checked later while sending the RPC via a specific NETCONF session
- * (#nc_send_rpc()) since the NETCONF capabilities of the session are needed for such a
- * check. Created object can be sent via any NETCONF session which supports all the
- * needed NETCONF capabilities for the RPC.
- *
- * @param[in] datastore Source datastore, foreign identity so a module name prefix is required.
- * @param[in] default_op Optional default operation.
- * @param[in] edit_content Config or URL where the config to perform is to be found.
- * @param[in] paramtype How to further manage data parameters.
- * @return Created RPC object to send via a NETCONF session or NULL in case of (memory allocation) error.
- */
-struct nc_rpc *nc_rpc_editdata(const char *datastore, NC_RPC_EDIT_DFLTOP default_op, const char *edit_content,
-                               NC_PARAMTYPE paramtype);
 
 /**
  * @brief Free the NETCONF RPC object.
@@ -509,11 +464,5 @@ void nc_reply_free(struct nc_reply *reply);
  * @param[in] notif Object to free.
  */
 void nc_notif_free(struct nc_notif *notif);
-
-/**@} Client Messages */
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* NC_MESSAGES_CLIENT_H_ */
